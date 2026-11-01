@@ -327,7 +327,7 @@ SANADA < 大岩
           state.leagues.map(l => h('option', { value: l.id, selected: l.id === lg.id }, l.name))),
         h('button', { class: 'btn small', onclick: createLeague }, '＋ 新規リーグ'),
         h('span', { class: 'spacer' }),
-        h('button', { class: 'btn', onclick: gistDialog }, 'Gist'),
+        h('button', { class: 'btn icon', onclick: gistDialog, 'aria-label': 'Gistの設定', title: 'Gistの設定(保存 / 共有)' }, '⚙'),
         h('button', { class: 'btn', onclick: ioDialog }, 'インポート / エクスポート')),
       h('nav', { class: 'tabs', role: 'tablist' }, tabs.map(([id, label]) => h('button', {
         class: 'tab', role: 'tab', 'aria-selected': String(state.tab === id), onclick: () => setTab(id),
@@ -370,7 +370,7 @@ SANADA < 大岩
         h('button', { class: 'btn', onclick: () => duplicateLeague(lg) }, '複製'),
         h('button', { class: 'btn danger', onclick: () => deleteLeague(lg) }, '削除')),
       h('p', { class: 'muted', style: 'margin:8px 0 0' },
-        '入力した内容はこのブラウザ(localStorage)に自動保存されます。別の端末へ移すときは右上の「Gist」か「インポート / エクスポート」を使います。'));
+        '入力した内容はこのブラウザ(localStorage)に自動保存されます。別の端末へ移すときは右上の「⚙」か「インポート / エクスポート」を使います。'));
   }
 
   function duplicateLeague(lg) {
@@ -1412,8 +1412,10 @@ SANADA < 大岩
       return `${Object.keys(files).length}件のリーグをGistに書き込みました`;
     }
 
-    async function createGist() {
+    // シークレットGistを新しく作り、そのIDを入力欄に入れる(今ある全リーグを1ファイルずつ書き込む)
+    async function makeGist() {
       saveSettings();
+      if (!G.getToken()) throw new Error('Gistの作成にはGitHubトークンが必要です。下の欄に入力してください');
       const files = {};
       for (const lg of state.leagues.slice(0, G.MAX_FILES)) {
         if (!lg.updatedAt) lg.updatedAt = Date.now();
@@ -1421,13 +1423,33 @@ SANADA < 大岩
       }
       const id = await G.create('league-simulator', files);
       G.setConfig({ gistId: id });
+      idInput.value = id;
       save();
-      return 'Gistを作成しました';
+      return 'シークレットGistを作成しました';
+    }
+
+    async function createGist() {
+      if (G.parseGistId(idInput.value)) {
+        return confirmInGist('今のGist IDとは別に、新しいシークレットGistを作ります。入力欄のIDは新しいGistのものに変わります(今のGistは削除されません)。',
+          '作成する', false, makeGist);
+      }
+      setStatus('Gistを作成しています…');
+      try {
+        toast(await makeGist());
+      } catch (e) {
+        setStatus(e.message, 'notice error');
+        if (!G.getToken()) tokenInput.focus();
+        return;
+      }
+      saveSettings();   // リンク(↗)を新しいIDに更新する
+      await refresh();
     }
 
     idInput.addEventListener('input', () => { const id = G.parseGistId(idInput.value); open.hidden = !id; if (id) open.href = G.pageUrl(id); });
     idInput.addEventListener('change', refresh);
-    tokenInput.addEventListener('change', () => { saveSettings(); if (snap) renderPlan(); });
+    const onToken = () => { G.setToken(tokenInput.value); if (snap) renderPlan(); };
+    tokenInput.addEventListener('input', onToken);
+    tokenInput.addEventListener('change', onToken);
 
     openDialog('Gist で保存 / 共有', [
       h('p', { class: 'muted', style: 'margin-top:0' },
@@ -1435,7 +1457,7 @@ SANADA < 大岩
       h('h3', {}, 'Gist'),
       h('div', { class: 'row' }, idInput, open,
         h('button', { class: 'btn', onclick: refresh }, '確認'),
-        h('button', { class: 'btn', disabled: !canWrite(), title: canWrite() ? '' : 'トークンが必要です', onclick: () => runInGist(createGist) }, 'Gistを作成')),
+        h('button', { class: 'btn', onclick: createGist }, 'Gistを作成')),
       h('h3', {}, 'GitHubトークン(Gist用)'),
       h('div', { class: 'row' }, tokenInput),
       h('p', { class: 'muted', style: 'margin:6px 0 0' },
