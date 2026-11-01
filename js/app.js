@@ -570,7 +570,11 @@ SANADA < 大岩
     const total = ps.length * (ps.length - 1) / 2;
     const done = Object.keys(lg.results).length;
 
-    const head = h('tr', {}, h('th', {}), ps.map(p => h('th', { scope: 'col' }, h('div', { class: 'vname' }, p.name))));
+    const ptsOf = new Map(computeStandings(lg).rows.map(row => [row.p.id, row.pts]));
+
+    const head = h('tr', {}, h('th', {}),
+      ps.map(p => h('th', { scope: 'col' }, h('div', { class: 'vname' }, p.name))),
+      h('th', { class: 'rk', scope: 'col' }, '勝ち点'));
     const body = ps.map((rp, r) => h('tr', {},
       h('th', { scope: 'row', class: 'rname' }, rp.name),
       ps.map((cp, c) => {
@@ -581,7 +585,8 @@ SANADA < 大岩
             class: 'cell-btn', 'aria-label': `${rp.name} vs ${cp.name}: ${info.label}`,
             onclick: () => matchDialog(lg, rp, cp),
           }, info.text));
-      })));
+      }),
+      h('td', { class: 'rk' }, fmtPts(ptsOf.get(rp.id)))));
 
     const legend = lg.outcomes.map(o => o.kind === 'shared'
       ? h('span', {}, h('span', { class: 'sw cell-shared' }, o.mark), o.name)

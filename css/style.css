@@ -169,6 +169,8 @@ tr.dim td { color: var(--muted); }
 .cell-lose { background: var(--lose-bg); color: var(--lose); }
 .cell-shared { background: var(--shared-bg); color: var(--shared); }
 .cell-pending { color: var(--line); }
+.star .rk { padding: 0 10px; white-space: nowrap; text-align: right; background: var(--surface-2); font-variant-numeric: tabular-nums; }
+.star td.rk { font-weight: 700; font-size: .95rem; }
 .legend { display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 10px; font-size: .85rem; color: var(--muted); }
 .legend span.sw { display: inline-block; min-width: 1.6em; padding: 0 4px; text-align: center; font-weight: 700; border-radius: 4px; margin-right: 4px; }
 
