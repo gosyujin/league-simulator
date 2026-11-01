@@ -49,7 +49,8 @@
   // 内部表現 ⇔ 保存形式
   // ─────────────────────────────────────────────
 
-  function serializeLeague(lg) {
+  // opts.withId: 端末内の保存やGist同期用に、リーグの id と更新日時も含める(ファイルのエクスポートには含めない)
+  function serializeLeague(lg, opts) {
     const ps = lg.participants;
     const nameOf = id => (ps.find(p => p.id === id) || {}).name;
     const matches = [];
@@ -62,18 +63,25 @@
         matches.push(m);
       }
     }
-    return {
+    const out = {};
+    if (opts && opts.withId) {
+      out.id = lg.id;
+      if (isNum(lg.updatedAt)) out.updatedAt = lg.updatedAt;
+    }
+    return Object.assign(out, {
       name: lg.name,
       participants: ps.map(p => p.name),
       outcomes: lg.outcomes.map(o => Object.assign({}, o)),
       matches,
       target: Object.assign({}, lg.target),
-    };
+    });
   }
 
   const isNum = v => typeof v === 'number' && isFinite(v);
+  const ID_PATTERN = /^[A-Za-z0-9_-]{1,40}$/;
 
-  function deserializeLeague(raw) {
+  // opts.keepId: 保存データやGistから戻すときに、raw の id と更新日時を引き継ぐ(通常の取り込みは新しい id を振る)
+  function deserializeLeague(raw, opts) {
     if (!raw || typeof raw !== 'object') throw new Error('リーグのデータが不正です');
     const label = `リーグ「${raw.name || ''}」`;
 
@@ -128,14 +136,20 @@
       mode: t.mode === 'exact' ? 'exact' : 'within',
       n: Math.min(Math.max(parseInt(t.n, 10) || 1, 1), Math.max(names.length, 1)),
     };
-    return { id: makeId('l'), name: String(raw.name || '無題のリーグ'), participants, outcomes, results, target };
+    const keep = !!(opts && opts.keepId);
+    const lg = {
+      id: keep && typeof raw.id === 'string' && ID_PATTERN.test(raw.id) ? raw.id : makeId('l'),
+      name: String(raw.name || '無題のリーグ'), participants, outcomes, results, target,
+    };
+    if (keep && isNum(raw.updatedAt)) lg.updatedAt = raw.updatedAt;
+    return lg;
   }
 
-  function exportFile(leagues) {
+  function exportFile(leagues, opts) {
     return {
       app: APP_ID, version: FORMAT_VERSION,
       exportedAt: new Date().toISOString(),
-      leagues: leagues.map(serializeLeague),
+      leagues: leagues.map(lg => serializeLeague(lg, opts)),
     };
   }
 
@@ -265,7 +279,7 @@
    *  - このアプリのエクスポートファイル
    *  - 星取マトリクス形式のJSON / 「竹下 > 後藤」形式のテキスト（league.js の入力ファイル）
    */
-  function parseImport(text, fileName) {
+  function parseImport(text, fileName, opts) {
     const baseName = (fileName || '').replace(/\.[^.]+$/, '') || 'インポート';
     const trimmed = text.trim();
     if (!trimmed) throw new Error('内容が空です');
@@ -287,10 +301,10 @@
     } else {
       raws = [parsePlainText(trimmed, baseName)];
     }
-    return raws.map(deserializeLeague);
+    return raws.map(raw => deserializeLeague(raw, opts));
   }
 
-  const api = { MAX_PARTICIPANTS, makeId, defaultOutcomes, newLeague, serializeLeague, deserializeLeague, exportFile, parseImport };
+  const api = { MAX_PARTICIPANTS, ID_PATTERN, makeId, defaultOutcomes, newLeague, serializeLeague, deserializeLeague, exportFile, parseImport };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   root.LeagueModel = api;
 })(typeof self !== 'undefined' ? self : globalThis);

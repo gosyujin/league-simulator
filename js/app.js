@@ -4,6 +4,7 @@
 
   const E = window.LeagueEngine;
   const M = window.LeagueModel;
+  const G = window.LeagueGist;
   const { pairKey } = E;
 
   const STORAGE_KEY = 'league-simulator:v1';
@@ -119,6 +120,7 @@ SANADA < 大岩
   /** buttons: [{label, cls, onClick}] — onClick が true を返すと閉じない */
   function openDialog(title, body, buttons, opts) {
     dlg.classList.toggle('wide', !!(opts && opts.wide));
+    dlg.classList.toggle('mid', !!(opts && opts.mid));
     dlg.replaceChildren(
       h('div', { class: 'dlg-head' }, title),
       h('div', { class: 'dlg-body' }, body),
@@ -186,7 +188,12 @@ SANADA < 大岩
       raw = localStorage.getItem(STORAGE_KEY);
       if (raw) {
         const obj = JSON.parse(raw);
-        state.leagues = obj.leagues.map(M.deserializeLeague);
+        state.leagues = obj.leagues.map(raw => M.deserializeLeague(raw, { keepId: true }));
+        const seen = new Set();
+        for (const l of state.leagues) {   // 手で編集されて id が重複していても、別のリーグとして扱えるようにする
+          if (seen.has(l.id)) l.id = M.makeId('l');
+          seen.add(l.id);
+        }
         const lg = state.leagues[obj.current] || state.leagues[0];
         state.currentId = lg && lg.id;
       }
@@ -201,13 +208,28 @@ SANADA < 大岩
       state.leagues = [lg];
       state.currentId = lg.id;
     }
+    for (const lg of state.leagues) leagueSigs.set(lg.id, G.signature(M, lg));
     state.tab = cur().participants.length ? 'board' : 'setup';
+  }
+
+  // リーグごとの「前回保存時の内容」。内容が変わったときだけ更新日時を進める(Gistとの新旧の目安)
+  const leagueSigs = new Map();
+
+  function touchLeagues() {
+    for (const lg of state.leagues) {
+      const sig = G.signature(M, lg);
+      if (leagueSigs.get(lg.id) === sig) continue;
+      // Gistから読み込んだ直後(記録なし・更新日時あり)は、Gist側の更新日時を保つ
+      if (leagueSigs.has(lg.id) || !lg.updatedAt) lg.updatedAt = Date.now();
+      leagueSigs.set(lg.id, sig);
+    }
   }
 
   let saveWarned = false;
   function save() {
     try {
-      const obj = M.exportFile(state.leagues);
+      touchLeagues();
+      const obj = M.exportFile(state.leagues, { withId: true });
       obj.current = state.leagues.findIndex(l => l.id === state.currentId);
       localStorage.setItem(STORAGE_KEY, JSON.stringify(obj));
     } catch (e) {
@@ -305,6 +327,7 @@ SANADA < 大岩
           state.leagues.map(l => h('option', { value: l.id, selected: l.id === lg.id }, l.name))),
         h('button', { class: 'btn small', onclick: createLeague }, '＋ 新規リーグ'),
         h('span', { class: 'spacer' }),
+        h('button', { class: 'btn', onclick: gistDialog }, 'Gist'),
         h('button', { class: 'btn', onclick: ioDialog }, 'インポート / エクスポート')),
       h('nav', { class: 'tabs', role: 'tablist' }, tabs.map(([id, label]) => h('button', {
         class: 'tab', role: 'tab', 'aria-selected': String(state.tab === id), onclick: () => setTab(id),
@@ -347,7 +370,7 @@ SANADA < 大岩
         h('button', { class: 'btn', onclick: () => duplicateLeague(lg) }, '複製'),
         h('button', { class: 'btn danger', onclick: () => deleteLeague(lg) }, '削除')),
       h('p', { class: 'muted', style: 'margin:8px 0 0' },
-        '入力した内容はこのブラウザ(localStorage)に自動保存されます。別の端末へ移すときは右上の「インポート / エクスポート」を使います。'));
+        '入力した内容はこのブラウザ(localStorage)に自動保存されます。別の端末へ移すときは右上の「Gist」か「インポート / エクスポート」を使います。'));
   }
 
   function duplicateLeague(lg) {
@@ -1216,6 +1239,215 @@ SANADA < 大岩
       { label: '閉じる' },
       { label: '読み込む', cls: 'primary', onClick: doImport },
     ]);
+  }
+
+  // ─────────────────────────────────────────────
+  // Gist 同期
+  // ─────────────────────────────────────────────
+
+  const fmtTime = t => (t ? new Date(t).toLocaleString('ja-JP', { dateStyle: 'short', timeStyle: 'short' }) : '-');
+
+  // Gist のリーグをこの端末へ取り込む(同じ id のリーグがあれば置き換える)
+  function applyRemote(remote) {
+    const i = state.leagues.findIndex(l => l.id === remote.id);
+    leagueSigs.delete(remote.id);   // Gist側の更新日時をそのまま保つ(touchLeagues 参照)
+    if (i >= 0) state.leagues[i] = remote; else state.leagues.push(remote);
+    if (state.currentId === remote.id) { cancelSim(); state.sim = freshSim(); }
+    save(); render();
+  }
+
+  // 操作を実行し、結果を知らせて、最新の状態でGistのダイアログを開き直す
+  async function runInGist(action) {
+    try {
+      const message = await action();
+      if (message) toast(message);
+    } catch (e) {
+      toast(e.message);
+    }
+    gistDialog();
+  }
+
+  /** 確認ダイアログは同じ <dialog> を使うので、確認のあとに Gist のダイアログを開き直す */
+  async function confirmInGist(message, okLabel, danger, action) {
+    const ok = await confirmDialog(message, okLabel, danger);
+    await new Promise(r => setTimeout(r, 0));   // 確認ダイアログが閉じ終わってから開き直す
+    if (ok) await runInGist(action);
+    else gistDialog();
+  }
+
+  function gistDialog() {
+    const idInput = h('input', {
+      type: 'text', value: G.getConfig().gistId, placeholder: 'Gist ID または URL', spellcheck: false,
+      autocomplete: 'off', 'aria-label': 'Gist ID', style: 'flex:1',
+    });
+    const tokenInput = h('input', {
+      type: 'password', value: G.getToken(), placeholder: 'ghp_… (書き込むときだけ必要)', autocomplete: 'off',
+      'aria-label': 'GitHubトークン(Gist用)', style: 'flex:1',
+    });
+    const open = h('a', { class: 'btn small', target: '_blank', rel: 'noopener', title: 'GitHubでこのGistを開く' }, '↗');
+    const status = h('p', { class: 'muted', style: 'margin:8px 0' });
+    const listBox = h('div', {});
+    let snap = null, plan = [], seq = 0;
+
+    const saveSettings = () => {
+      const gistId = G.parseGistId(idInput.value);
+      G.setConfig({ gistId });
+      G.setToken(tokenInput.value);
+      open.hidden = !gistId;
+      if (gistId) open.href = G.pageUrl(gistId);
+      return gistId;
+    };
+    const canWrite = () => !!G.getToken();
+    const setStatus = (text, cls) => { status.className = cls || 'muted'; status.textContent = text; };
+
+    async function refresh() {
+      const gistId = saveSettings();
+      const mine = ++seq;
+      listBox.replaceChildren();
+      if (!gistId) {
+        snap = null;
+        setStatus('Gist ID を入れると、そのGistにあるリーグを読み込めます。トークンも設定すると書き込めます。IDがなければ「Gistを作成」を押してください。');
+        return;
+      }
+      setStatus('Gistを確認しています…');
+      try {
+        const s = await G.fetchLeagueFiles(gistId);
+        if (mine !== seq) return;
+        snap = s;
+        plan = G.buildPlan(M, state.leagues, s.files);
+        renderPlan();
+      } catch (e) {
+        if (mine !== seq) return;
+        snap = null;
+        setStatus(e.message, 'notice error');
+      }
+    }
+
+    const statusChip = row => {
+      if (row.status === 'same') return h('span', { class: 'chip ok' }, '同じ内容');
+      if (row.status === 'local-only') return h('span', { class: 'chip warn' }, 'この端末のみ');
+      if (row.status === 'remote-only') return h('span', { class: 'chip warn' }, 'Gistのみ');
+      if (row.status === 'broken') return h('span', { class: 'chip ng', title: row.error }, '読み込めない');
+      return h('span', { class: 'chip ng' }, '内容が違う');
+    };
+
+    const newerNote = row => (row.newer === 'local' ? '(この端末が新しい)' : row.newer === 'remote' ? '(Gistが新しい)' : '');
+
+    function renderPlan() {
+      const total = snap.fileCount;
+      const notes = [];
+      if (snap.truncated) notes.push('Gistのファイルが多すぎるため、一部しか取得できていません。');
+      else if (total >= G.MAX_FILES) notes.push(`このGistは上限(${G.MAX_FILES}ファイル)に達しています。新しいリーグは別のGistに書き込んでください。`);
+      setStatus(`Gistにはリーグが${snap.files.length}件あります(ファイル総数 ${total}/${G.MAX_FILES})。` +
+        (canWrite() ? '' : ' トークン未設定のため読み込み専用です。') + notes.join(' '));
+
+      const remoteOnly = plan.filter(r => r.status === 'remote-only');
+      const localOnly = plan.filter(r => r.status === 'local-only');
+      const bulk = h('div', { class: 'row', style: 'margin-bottom:8px' },
+        h('button', { class: 'btn', disabled: !remoteOnly.length, onclick: () => runInGist(() => pullRows(remoteOnly)) }, `Gistのみのリーグを取り込む(${remoteOnly.length})`),
+        h('button', { class: 'btn', disabled: !localOnly.length || !canWrite(), onclick: () => runInGist(() => pushRows(localOnly)) }, `この端末のみのリーグを書き込む(${localOnly.length})`));
+
+      const rows = plan.map(row => h('tr', { class: row.status === 'same' ? 'dim' : '' },
+        h('td', {}, row.name),
+        h('td', {}, statusChip(row)),
+        h('td', { class: 'g-time' },
+          row.local ? h('div', {}, '端末 ', fmtTime(row.local.updatedAt)) : null,
+          row.remote ? h('div', {}, 'Gist ', fmtTime(row.remote.updatedAt)) : null,
+          row.newer ? h('div', { class: 'muted' }, newerNote(row)) : null),
+        h('td', { class: 'g-actions' }, rowActions(row))));
+
+      listBox.replaceChildren(plan.length
+        ? h('div', {}, bulk, h('div', { class: 'table-wrap' }, h('table', {},
+          h('thead', {}, h('tr', {}, h('th', {}, 'リーグ'), h('th', {}, '状態'), h('th', {}, '更新日時'), h('th', {}, ''))),
+          h('tbody', {}, rows))))
+        : h('p', { class: 'muted' }, 'Gistにもこの端末にもリーグがありません。'));
+    }
+
+    function rowActions(row) {
+      const pull = label => h('button', {
+        class: 'btn small', onclick: () => (row.local
+          ? confirmInGist(`リーグ「${row.name}」を、Gistの内容で置き換えます。この端末の変更は失われます。`, '置き換える', true, () => pullRows([row]))
+          : runInGist(() => pullRows([row]))),
+      }, label);
+      const push = label => h('button', {
+        class: 'btn small', disabled: !canWrite(), title: canWrite() ? '' : 'トークンが必要です',
+        onclick: () => (row.remote
+          ? confirmInGist(`リーグ「${row.name}」を、この端末の内容でGistに上書きします。Gistの内容は失われます。`, '上書きする', true, () => pushRows([row]))
+          : runInGist(() => pushRows([row]))),
+      }, label);
+      const del = h('button', {
+        class: 'btn small danger', disabled: !canWrite(), title: canWrite() ? '' : 'トークンが必要です',
+        onclick: () => confirmInGist(`Gistからリーグ「${row.name}」のファイルを削除します。この端末のリーグは残ります。`, 'Gistから削除', true, async () => {
+          await G.update(G.getConfig().gistId, { [row.file]: null });
+          return 'Gistから削除しました';
+        }),
+      }, 'Gistから削除');
+      if (row.status === 'remote-only') return [pull('取り込む'), del];
+      if (row.status === 'local-only') return [push('書き込む')];
+      if (row.status === 'same') return [del];
+      if (row.status === 'broken') return [row.local ? push('書き込んで直す') : null, del];
+      return [pull('Gistで置き換え'), push('この端末で上書き'), del];
+    }
+
+    function pullRows(rows) {
+      const list = rows.filter(r => r.remote);
+      for (const r of list) applyRemote(r.remote);
+      return `${list.length}件のリーグを読み込みました`;
+    }
+
+    async function pushRows(rows) {
+      const gistId = saveSettings();
+      const files = {};
+      for (const r of rows) {
+        if (!r.local) continue;
+        if (!r.local.updatedAt) r.local.updatedAt = Date.now();
+        files[r.file] = G.leagueFileText(M, r.local);
+      }
+      const added = rows.filter(r => r.local && !r.remote && r.status !== 'broken').length;
+      if (snap && snap.fileCount + added > G.MAX_FILES) {
+        throw new Error(`1つのGistは${G.MAX_FILES}ファイルまでです。別のGistに書き込んでください`);
+      }
+      await G.update(gistId, files);
+      save();
+      return `${Object.keys(files).length}件のリーグをGistに書き込みました`;
+    }
+
+    async function createGist() {
+      saveSettings();
+      const files = {};
+      for (const lg of state.leagues.slice(0, G.MAX_FILES)) {
+        if (!lg.updatedAt) lg.updatedAt = Date.now();
+        files[G.fileName(lg.id)] = G.leagueFileText(M, lg);
+      }
+      const id = await G.create('league-simulator', files);
+      G.setConfig({ gistId: id });
+      save();
+      return 'Gistを作成しました';
+    }
+
+    idInput.addEventListener('input', () => { const id = G.parseGistId(idInput.value); open.hidden = !id; if (id) open.href = G.pageUrl(id); });
+    idInput.addEventListener('change', refresh);
+    tokenInput.addEventListener('change', () => { saveSettings(); if (snap) renderPlan(); });
+
+    openDialog('Gist で保存 / 共有', [
+      h('p', { class: 'muted', style: 'margin-top:0' },
+        'リーグ1件が、1つのGistの中の1ファイルになります。リーグが増えると、Gistのファイルも1つずつ増えます。自動では同期せず、下の一覧からリーグ単位で読み込み・書き込みを選びます。'),
+      h('h3', {}, 'Gist'),
+      h('div', { class: 'row' }, idInput, open,
+        h('button', { class: 'btn', onclick: refresh }, '確認'),
+        h('button', { class: 'btn', disabled: !canWrite(), title: canWrite() ? '' : 'トークンが必要です', onclick: () => runInGist(createGist) }, 'Gistを作成')),
+      h('h3', {}, 'GitHubトークン(Gist用)'),
+      h('div', { class: 'row' }, tokenInput),
+      h('p', { class: 'muted', style: 'margin:6px 0 0' },
+        '読み込みだけならトークンは不要です(IDを知っている人は誰でも読めます)。書き込み・作成・削除には、gist スコープの classic トークンが必要です。',
+        h('a', { href: G.TOKEN_ISSUE_URL, target: '_blank', rel: 'noopener' }, 'トークンを発行'),
+        '。トークンはこの端末のlocalStorageにだけ保存され、GitHub以外には送りません。共有PCでは入力しないでください。'),
+      status,
+      listBox,
+    ], [{ label: '閉じる' }], { mid: true });
+
+    saveSettings();
+    refresh();
   }
 
   // ─────────────────────────────────────────────

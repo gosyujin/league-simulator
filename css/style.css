@@ -204,6 +204,7 @@ dialog {
   width: min(92vw, 520px); max-height: 88vh; box-shadow: 0 20px 50px rgb(0 0 0 / 30%);
 }
 dialog.wide { width: min(96vw, 1240px); }
+dialog.mid { width: min(94vw, 780px); }
 dialog::backdrop { background: rgb(10 14 22 / 55%); }
 .dlg-head { padding: 14px 18px 4px; font-weight: 700; font-size: 1.05rem; }
 .dlg-body { padding: 8px 18px 12px; overflow-y: auto; max-height: calc(88vh - 130px); }
@@ -215,6 +216,13 @@ dialog::backdrop { background: rgb(10 14 22 / 55%); }
 .dlg-body h3 { margin: 14px 0 6px; }
 .dlg-body h3:first-child { margin-top: 4px; }
 .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+a.btn { display: inline-block; text-decoration: none; }
+a.btn[hidden] { display: none; }
+
+/* ── Gist 同期 ── */
+.g-time { font-size: .82rem; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.g-actions { white-space: nowrap; text-align: right; }
+.g-actions .btn + .btn { margin-left: 4px; }
 
 #toast {
   position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%) translateY(20px);
