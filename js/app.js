@@ -1,0 +1,1093 @@
+/* リーグ戦シミュレーター UI */
+(function () {
+  'use strict';
+
+  const E = window.LeagueEngine;
+  const M = window.LeagueModel;
+  const { pairKey } = E;
+
+  const STORAGE_KEY = 'league-simulator:v1';
+  const EXHAUSTIVE_LIMIT = 20000000;   // これを超える場合は全網羅せずランダム抽出にする
+  const SAMPLE_DEFAULT = 1000000;
+  const DETAIL_PAGE = 300;
+
+  const SAMPLE_NAME = 'G1 Aブロック(サンプル)';
+  const SAMPLE_TEXT = `participants: 竹下 後藤 ボルチン 辻 鷹木 ジェイク SANADA オーカーン アイス 大岩
+scoring: win=2 loss=0 draw=1 void=0
+
+竹下 > 後藤
+竹下 > ボルチン
+竹下 < 辻
+竹下 < 鷹木
+竹下 > ジェイク
+竹下 > SANADA
+竹下 > オーカーン
+竹下 > アイス
+後藤 > ボルチン
+後藤 > 辻
+後藤 < 鷹木
+後藤 < ジェイク
+後藤 > SANADA
+後藤 < オーカーン
+後藤 < 大岩
+ボルチン > 辻
+ボルチン > 鷹木
+ボルチン > ジェイク
+ボルチン > SANADA
+ボルチン > アイス
+ボルチン < 大岩
+辻 > 鷹木
+辻 < SANADA
+辻 > オーカーン
+辻 > アイス
+辻 > 大岩
+鷹木 < ジェイク
+鷹木 > オーカーン
+鷹木 < アイス
+鷹木 > 大岩
+ジェイク < SANADA
+ジェイク > オーカーン
+ジェイク < アイス
+ジェイク < 大岩
+SANADA < オーカーン
+SANADA > アイス
+SANADA < 大岩
+オーカーン < アイス
+オーカーン < 大岩
+アイス > 大岩
+`;
+
+  // ─────────────────────────────────────────────
+  // DOM ヘルパー（innerHTML は使わず、名前などは常にテキストとして挿入する）
+  // ─────────────────────────────────────────────
+
+  const $ = sel => document.querySelector(sel);
+
+  function appendKids(el, kids) {
+    for (const k of kids) {
+      if (k === null || k === undefined || k === false) continue;
+      if (Array.isArray(k)) appendKids(el, k);
+      else el.append(k instanceof Node ? k : document.createTextNode(String(k)));
+    }
+  }
+
+  function h(tag, attrs, ...kids) {
+    const el = document.createElement(tag);
+    let deferredValue;
+    for (const [k, v] of Object.entries(attrs || {})) {
+      if (v === null || v === undefined || v === false) continue;
+      if (k === 'class') el.className = v;
+      else if (k.startsWith('on') && typeof v === 'function') el.addEventListener(k.slice(2), v);
+      else if (k === 'value' && tag === 'select') deferredValue = v;
+      else if (k in el) el[k] = v;
+      else el.setAttribute(k, v === true ? '' : v);
+    }
+    appendKids(el, kids);
+    if (deferredValue !== undefined) el.value = deferredValue;
+    return el;
+  }
+
+  const fmt = v => v.toLocaleString('ja-JP');
+  const fmtPts = v => String(Math.round(v * 1000) / 1000);
+  function fmtBig(v) {
+    if (v < 1e12) return fmt(v);
+    const exp = Math.floor(Math.log10(v));
+    return `約${(v / Math.pow(10, exp)).toFixed(1)}×10^${exp}`;
+  }
+  const pct = (a, b) => {
+    if (!b) return '-';
+    const v = a / b * 100;
+    return (v === 0 || v === 100 ? v.toFixed(0) : v < 0.1 ? '<0.1' : v.toFixed(1)) + '%';
+  };
+
+  let toastTimer;
+  function toast(msg) {
+    const t = $('#toast');
+    t.textContent = msg;
+    t.classList.add('show');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => t.classList.remove('show'), 3200);
+  }
+
+  // ─────────────────────────────────────────────
+  // ダイアログ
+  // ─────────────────────────────────────────────
+
+  const dlg = $('#dlg');
+  dlg.addEventListener('click', e => { if (e.target === dlg) dlg.close(); });
+
+  /** buttons: [{label, cls, onClick}] — onClick が true を返すと閉じない */
+  function openDialog(title, body, buttons) {
+    dlg.replaceChildren(
+      h('div', { class: 'dlg-head' }, title),
+      h('div', { class: 'dlg-body' }, body),
+      h('div', { class: 'dlg-foot' }, buttons.map(b => h('button', {
+        class: 'btn ' + (b.cls || ''),
+        onclick: async () => {
+          const keep = b.onClick ? await b.onClick() : undefined;
+          if (keep !== true && dlg.open) dlg.close();
+        },
+      }, b.label))),
+    );
+    if (!dlg.open) dlg.showModal();
+  }
+
+  function confirmDialog(message, okLabel, danger) {
+    return new Promise(resolve => {
+      let done = false;
+      const finish = v => { if (!done) { done = true; resolve(v); } };
+      openDialog('確認', h('p', {}, message), [
+        { label: 'キャンセル', onClick: () => finish(false) },
+        { label: okLabel || 'OK', cls: danger ? 'danger' : 'primary', onClick: () => finish(true) },
+      ]);
+      dlg.addEventListener('close', () => finish(false), { once: true });
+    });
+  }
+
+  function askText(title, label, initial) {
+    return new Promise(resolve => {
+      let done = false;
+      const finish = v => { if (!done) { done = true; resolve(v); } };
+      const input = h('input', { type: 'text', value: initial || '', maxlength: 40, style: 'width:100%' });
+      input.addEventListener('keydown', e => {
+        if (e.key === 'Enter') { finish(input.value.trim() || null); dlg.close(); }
+      });
+      openDialog(title, h('label', {}, h('div', { class: 'muted' }, label), input), [
+        { label: 'キャンセル', onClick: () => finish(null) },
+        { label: 'OK', cls: 'primary', onClick: () => finish(input.value.trim() || null) },
+      ]);
+      dlg.addEventListener('close', () => finish(null), { once: true });
+      input.focus(); input.select();
+    });
+  }
+
+  // ─────────────────────────────────────────────
+  // 状態と保存
+  // ─────────────────────────────────────────────
+
+  const state = { leagues: [], currentId: null, tab: 'board', sim: freshSim() };
+
+  function freshSim() {
+    return {
+      job: null, running: false, progress: null, progressEl: null, error: null,
+      result: null, snap: null, key: null,
+      detail: null, detailFor: null, detailLoading: false, detailLimit: DETAIL_PAGE,
+      pctMode: false, sampleN: SAMPLE_DEFAULT,
+    };
+  }
+
+  const cur = () => state.leagues.find(l => l.id === state.currentId);
+  const outcomeOf = (lg, id) => lg.outcomes.find(o => o.id === id);
+
+  function load() {
+    let raw = null;
+    try {
+      raw = localStorage.getItem(STORAGE_KEY);
+      if (raw) {
+        const obj = JSON.parse(raw);
+        state.leagues = obj.leagues.map(M.deserializeLeague);
+        const lg = state.leagues[obj.current] || state.leagues[0];
+        state.currentId = lg && lg.id;
+      }
+    } catch (e) {
+      console.warn('保存データを読み込めませんでした', e);
+      state.leagues = [];
+      try { localStorage.setItem(STORAGE_KEY + ':broken', raw); } catch (_) { /* 退避に失敗しても続行 */ }
+      setTimeout(() => toast('保存データを読み込めませんでした。新しく始めます'), 0);
+    }
+    if (!state.leagues.length) {
+      const lg = M.newLeague('リーグ1');
+      state.leagues = [lg];
+      state.currentId = lg.id;
+    }
+    state.tab = cur().participants.length ? 'board' : 'setup';
+  }
+
+  let saveWarned = false;
+  function save() {
+    try {
+      const obj = M.exportFile(state.leagues);
+      obj.current = state.leagues.findIndex(l => l.id === state.currentId);
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(obj));
+    } catch (e) {
+      if (!saveWarned) {
+        saveWarned = true;
+        toast('ブラウザに保存できませんでした。エクスポートで保存してください');
+      }
+    }
+  }
+
+  function switchLeague(id) {
+    cancelSim();
+    state.currentId = id;
+    state.sim = freshSim();
+    save();
+    render();
+    window.scrollTo(0, 0);
+  }
+
+  function setTab(tab) {
+    state.tab = tab;
+    render();
+    window.scrollTo(0, 0);
+  }
+
+  // ─────────────────────────────────────────────
+  // 計算ジョブ（Web Worker。使えない環境ではメインスレッドで実行）
+  // ─────────────────────────────────────────────
+
+  function startJob(msg, onProgress) {
+    let worker = null;
+    let rejectFn;
+    const promise = new Promise((resolve, reject) => {
+      rejectFn = reject;
+      const inline = () => setTimeout(() => {
+        try {
+          if (msg.type === 'run') resolve(E.run(msg.problem, msg.opts));
+          else resolve(E.detail(msg.problem, msg.opts));
+        } catch (e) { reject(e); }
+      }, 30);
+
+      try { worker = new Worker('js/worker.js'); } catch (e) { inline(); return; }
+      worker.onmessage = ev => {
+        const d = ev.data;
+        if (d.type === 'progress') { if (onProgress) onProgress(d); return; }
+        worker.terminate(); worker = null;
+        if (d.type === 'error') reject(new Error(d.message));
+        else resolve(d.result);
+      };
+      worker.onerror = ev => {   // file:// で開いた場合など
+        if (ev.preventDefault) ev.preventDefault();
+        if (worker) { worker.terminate(); worker = null; }
+        inline();
+      };
+      worker.postMessage(msg);
+    });
+    return {
+      promise,
+      cancel() {
+        if (worker) { worker.terminate(); worker = null; }
+        rejectFn(new Error('cancelled'));
+      },
+    };
+  }
+
+  function cancelSim() {
+    const sim = state.sim;
+    if (sim.job) { sim.job.cancel(); sim.job = null; }
+    sim.running = false;
+    sim.detailLoading = false;
+  }
+
+  // ─────────────────────────────────────────────
+  // 画面全体
+  // ─────────────────────────────────────────────
+
+  function render() {
+    const y = window.scrollY;
+    renderAppbar();
+    const lg = cur();
+    const view = { setup: viewSetup, board: viewBoard, sim: viewSim }[state.tab];
+    const app = $('#app');
+    app.replaceChildren();
+    appendKids(app, view(lg));
+    window.scrollTo(0, y);
+  }
+
+  function renderAppbar() {
+    const lg = cur();
+    const tabs = [['setup', '1. 設定'], ['board', '2. 星取表'], ['sim', '3. シミュレーション']];
+    $('#appbar').replaceChildren(
+      h('div', { class: 'appbar-row' },
+        h('span', { class: 'brand' }, '🏆 リーグ戦シミュレーター'),
+        h('select', { 'aria-label': 'リーグを選択', onchange: e => switchLeague(e.target.value) },
+          state.leagues.map(l => h('option', { value: l.id, selected: l.id === lg.id }, l.name))),
+        h('button', { class: 'btn small', onclick: createLeague }, '＋ 新規リーグ'),
+        h('span', { class: 'spacer' }),
+        h('button', { class: 'btn', onclick: ioDialog }, 'インポート / エクスポート')),
+      h('nav', { class: 'tabs', role: 'tablist' }, tabs.map(([id, label]) => h('button', {
+        class: 'tab', role: 'tab', 'aria-selected': String(state.tab === id), onclick: () => setTab(id),
+      }, label))),
+    );
+  }
+
+  async function createLeague() {
+    const name = await askText('新規リーグ', 'リーグ名（例: Bブロック）', '');
+    if (!name) return;
+    const lg = M.newLeague(name);
+    state.leagues.push(lg);
+    cancelSim();
+    state.currentId = lg.id;
+    state.sim = freshSim();
+    state.tab = 'setup';
+    save(); render();
+  }
+
+  // ─────────────────────────────────────────────
+  // 1. 設定タブ
+  // ─────────────────────────────────────────────
+
+  function viewSetup(lg) {
+    return [cardLeague(lg), cardParticipants(lg), cardOutcomes(lg)];
+  }
+
+  function cardLeague(lg) {
+    return h('section', { class: 'card' },
+      h('div', { class: 'card-head' }, h('h2', {}, 'リーグ')),
+      h('div', { class: 'row' },
+        h('input', {
+          type: 'text', value: lg.name, maxlength: 40, 'aria-label': 'リーグ名',
+          onchange: e => {
+            const v = e.target.value.trim();
+            if (!v) { e.target.value = lg.name; return; }
+            lg.name = v; save(); renderAppbar();
+          },
+        }),
+        h('button', { class: 'btn', onclick: () => duplicateLeague(lg) }, '複製'),
+        h('button', { class: 'btn danger', onclick: () => deleteLeague(lg) }, '削除')),
+      h('p', { class: 'muted', style: 'margin:8px 0 0' },
+        '入力した内容はこのブラウザ(localStorage)に自動保存されます。別の端末へ移すときは右上の「インポート / エクスポート」を使います。'));
+  }
+
+  function duplicateLeague(lg) {
+    const copy = M.deserializeLeague(M.serializeLeague(lg));
+    copy.name = lg.name + ' (コピー)';
+    state.leagues.push(copy);
+    cancelSim();
+    state.currentId = copy.id;
+    state.sim = freshSim();
+    save(); render();
+    toast('複製しました');
+  }
+
+  async function deleteLeague(lg) {
+    const ok = await confirmDialog(`リーグ「${lg.name}」を削除します。元に戻せません(事前にエクスポートしておくと安心です)。`, '削除する', true);
+    if (!ok) return;
+    cancelSim();
+    state.leagues = state.leagues.filter(l => l.id !== lg.id);
+    if (!state.leagues.length) state.leagues.push(M.newLeague('リーグ1'));
+    state.currentId = state.leagues[0].id;
+    state.sim = freshSim();
+    save(); render();
+  }
+
+  function cardParticipants(lg) {
+    const ps = lg.participants;
+    const input = h('input', {
+      type: 'text', placeholder: '名前を入力して Enter（スペースや読点で区切ると複数まとめて追加）',
+      'aria-label': '追加する参加者名',
+      onkeydown: e => { if (e.key === 'Enter' && !e.isComposing) add(); },
+    });
+    const add = () => {
+      const names = input.value.split(/[\s,、]+/).map(s => s.trim()).filter(Boolean);
+      if (!names.length) return;
+      const exist = new Set(ps.map(p => p.name));
+      const skipped = [];
+      for (const name of names) {
+        if (exist.has(name)) { skipped.push(name); continue; }
+        if (ps.length >= M.MAX_PARTICIPANTS) { toast(`参加者は${M.MAX_PARTICIPANTS}名までです`); break; }
+        ps.push({ id: M.makeId('p'), name });
+        exist.add(name);
+      }
+      if (skipped.length) toast(`すでにいる名前は追加しませんでした: ${skipped.join('、')}`);
+      save(); render();
+      const next = $('[aria-label="追加する参加者名"]');
+      if (next) next.focus();
+    };
+
+    const list = h('ul', { class: 'plist' }, ps.map((p, i) => h('li', {},
+      h('span', { class: 'idx' }, i + 1),
+      h('input', {
+        type: 'text', value: p.name, maxlength: 20, 'aria-label': `参加者${i + 1}の名前`,
+        onchange: e => {
+          const v = e.target.value.trim();
+          if (!v || ps.some(q => q !== p && q.name === v)) {
+            e.target.value = p.name;
+            toast(v ? '同じ名前の参加者がいます' : '名前を入力してください');
+            return;
+          }
+          p.name = v; save();
+        },
+      }),
+      h('button', { class: 'btn icon small', title: '上へ', disabled: i === 0, onclick: () => moveParticipant(lg, i, -1) }, '↑'),
+      h('button', { class: 'btn icon small', title: '下へ', disabled: i === ps.length - 1, onclick: () => moveParticipant(lg, i, 1) }, '↓'),
+      h('button', { class: 'btn icon small danger', title: '削除', onclick: () => removeParticipant(lg, p) }, '✕'))));
+
+    return h('section', { class: 'card' },
+      h('div', { class: 'card-head' },
+        h('h2', {}, `参加者（${ps.length}名）`),
+        h('span', { class: 'hint' }, `2〜${M.MAX_PARTICIPANTS}名。並び順が星取表の並びになります`)),
+      ps.length ? list : h('div', { class: 'empty', style: 'padding:12px' },
+        h('p', {}, '参加者がまだいません。下の入力欄から追加するか、サンプルを読み込んでください。'),
+        h('button', { class: 'btn', onclick: loadSample }, 'サンプル(G1 Aブロック)を読み込む')),
+      h('div', { class: 'add-row' }, input, h('button', { class: 'btn primary', onclick: add }, '追加')));
+  }
+
+  function moveParticipant(lg, i, d) {
+    const ps = lg.participants;
+    [ps[i], ps[i + d]] = [ps[i + d], ps[i]];
+    save(); render();
+  }
+
+  async function removeParticipant(lg, p) {
+    const keys = Object.keys(lg.results).filter(k => k.split('|').includes(p.id));
+    if (keys.length) {
+      const ok = await confirmDialog(`「${p.name}」を削除すると、${p.name}の試合結果${keys.length}件も消えます。`, '削除する', true);
+      if (!ok) return;
+    }
+    keys.forEach(k => delete lg.results[k]);
+    lg.participants = lg.participants.filter(q => q !== p);
+    save(); render();
+  }
+
+  function usageCount(lg, outcomeId) {
+    return Object.values(lg.results).filter(r => r.outcome === outcomeId).length;
+  }
+
+  function dropResultsOf(lg, outcomeId) {
+    for (const [k, r] of Object.entries(lg.results)) if (r.outcome === outcomeId) delete lg.results[k];
+  }
+
+  function cardOutcomes(lg) {
+    const numInput = (value, onSet, label) => h('input', {
+      type: 'number', step: 'any', value, 'aria-label': label,
+      onchange: e => {
+        const v = parseFloat(e.target.value);
+        if (!isFinite(v)) { e.target.value = value; return; }
+        onSet(v); save(); render();
+      },
+    });
+    const markInput = (value, onSet, label) => h('input', {
+      type: 'text', class: 'narrow', value, maxlength: 2, 'aria-label': label,
+      onchange: e => {
+        const v = e.target.value.trim();
+        if (!v) { e.target.value = value; return; }
+        onSet(v); save(); render();
+      },
+    });
+
+    const rows = lg.outcomes.map(o => {
+      const decisive = o.kind === 'decisive';
+      return h('tr', {},
+        h('td', {}, h('input', {
+          type: 'text', value: o.name, maxlength: 12, 'aria-label': '結果の名前',
+          onchange: e => { const v = e.target.value.trim(); if (!v) { e.target.value = o.name; return; } o.name = v; save(); },
+        })),
+        h('td', {}, h('select', {
+          'aria-label': '種類', value: o.kind,
+          onchange: async e => {
+            const to = e.target.value;
+            const used = usageCount(lg, o.id);
+            if (used) {
+              const ok = await confirmDialog(`種類を変えると、この結果が入力済みの${used}試合が未実施に戻ります。`, '変更する', true);
+              if (!ok) { e.target.value = o.kind; return; }
+              dropResultsOf(lg, o.id);
+            }
+            if (to === 'shared') { o.kind = 'shared'; o.pts = 1; o.mark = '分'; delete o.win; delete o.lose; delete o.loseMark; }
+            else { o.kind = 'decisive'; o.win = 2; o.lose = 0; o.mark = '勝'; o.loseMark = '負'; delete o.pts; }
+            save(); render();
+          },
+        }, h('option', { value: 'decisive' }, '勝敗が決まる'), h('option', { value: 'shared' }, '双方同じ点'))),
+        h('td', {}, decisive
+          ? h('div', { class: 'pts-cell' }, '勝者', numInput(o.win, v => { o.win = v; }, '勝者の点'), '敗者', numInput(o.lose, v => { o.lose = v; }, '敗者の点'))
+          : h('div', { class: 'pts-cell' }, '双方', numInput(o.pts, v => { o.pts = v; }, '双方の点'))),
+        h('td', {}, decisive
+          ? h('div', { class: 'pts-cell' }, markInput(o.mark, v => { o.mark = v; }, '勝者側の記号'), h('span', { class: 'sep' }, '/'), markInput(o.loseMark, v => { o.loseMark = v; }, '敗者側の記号'))
+          : markInput(o.mark, v => { o.mark = v; }, '記号')),
+        h('td', { style: 'text-align:center' }, h('input', {
+          type: 'checkbox', checked: o.simulate, 'aria-label': '未実施試合の予測に含める',
+          onchange: e => { o.simulate = e.target.checked; save(); render(); },
+        })),
+        h('td', {}, h('button', {
+          class: 'btn icon small danger', title: '削除', disabled: lg.outcomes.length <= 1,
+          onclick: async () => {
+            const used = usageCount(lg, o.id);
+            if (used) {
+              const ok = await confirmDialog(`「${o.name}」を削除すると、この結果が入力済みの${used}試合が未実施に戻ります。`, '削除する', true);
+              if (!ok) return;
+            }
+            dropResultsOf(lg, o.id);
+            lg.outcomes = lg.outcomes.filter(x => x !== o);
+            save(); render();
+          },
+        }, '✕')));
+    });
+
+    const addOutcome = () => {
+      lg.outcomes.push({ id: 'o' + Date.now().toString(36), name: '新しい結果', kind: 'shared', pts: 0, mark: '他', simulate: false });
+      save(); render();
+    };
+
+    return h('section', { class: 'card' },
+      h('div', { class: 'card-head' },
+        h('h2', {}, '試合結果の種類と勝ち点'),
+        h('span', { class: 'hint' }, '勝ち・負け・引き分け・その他の決着と、それぞれに付く点を決めます')),
+      h('div', { class: 'table-wrap' }, h('table', { class: 'otable' },
+        h('thead', {}, h('tr', {},
+          h('th', {}, '名前'), h('th', {}, '種類'), h('th', {}, '勝ち点'), h('th', {}, '星取表の記号'),
+          h('th', { title: '未実施の試合が、この結果になる場合も数え上げる' }, '予測に含める'), h('th', {}, ''))),
+        h('tbody', {}, rows))),
+      h('p', { class: 'muted', style: 'margin:10px 0' },
+        '「勝敗が決まる」は勝者と敗者に別々の点が入る結果です（例: 勝ち 2点/0点、反則勝ち 2点/0点）。',
+        '「双方同じ点」は両者に同じ点が入る結果です（例: 引き分け 1点、無効試合 0点）。',
+        '「予測に含める」にチェックした結果だけが、未実施試合で起こり得る結果として全パターンの列挙に使われます。'),
+      h('button', { class: 'btn', onclick: addOutcome }, '＋ 結果の種類を追加'));
+  }
+
+  // ─────────────────────────────────────────────
+  // 2. 星取表タブ
+  // ─────────────────────────────────────────────
+
+  function emptyCard(message, tab) {
+    return h('section', { class: 'card empty' },
+      h('p', {}, message),
+      h('button', { class: 'btn primary', onclick: () => setTab(tab || 'setup') }, '設定へ'));
+  }
+
+  function viewBoard(lg) {
+    if (lg.participants.length < 2) return emptyCard('参加者を2名以上登録すると星取表が表示されます。');
+    return [cardStarTable(lg), cardStandings(lg)];
+  }
+
+  function cellInfo(lg, r, c) {
+    const ps = lg.participants;
+    const res = lg.results[pairKey(ps[r].id, ps[c].id)];
+    const o = res && outcomeOf(lg, res.outcome);
+    if (!o) return { text: '', cls: 'cell-pending', label: '未実施' };
+    if (o.kind === 'shared') return { text: o.mark, cls: 'cell-shared', label: o.name };
+    return res.winner === ps[r].id
+      ? { text: o.mark, cls: 'cell-win', label: o.mark }
+      : { text: o.loseMark, cls: 'cell-lose', label: o.loseMark };
+  }
+
+  function cardStarTable(lg) {
+    const ps = lg.participants;
+    const total = ps.length * (ps.length - 1) / 2;
+    const done = Object.keys(lg.results).length;
+
+    const head = h('tr', {}, h('th', {}), ps.map(p => h('th', { scope: 'col' }, h('div', { class: 'vname' }, p.name))));
+    const body = ps.map((rp, r) => h('tr', {},
+      h('th', { scope: 'row', class: 'rname' }, rp.name),
+      ps.map((cp, c) => {
+        if (r === c) return h('td', { class: 'self' });
+        const info = cellInfo(lg, r, c);
+        return h('td', { class: info.cls },
+          h('button', {
+            class: 'cell-btn', 'aria-label': `${rp.name} vs ${cp.name}: ${info.label}`,
+            onclick: () => matchDialog(lg, rp, cp),
+          }, info.text));
+      })));
+
+    const legend = lg.outcomes.map(o => o.kind === 'shared'
+      ? h('span', {}, h('span', { class: 'sw cell-shared' }, o.mark), o.name)
+      : h('span', {}, h('span', { class: 'sw cell-win' }, o.mark), h('span', { class: 'sw cell-lose' }, o.loseMark), o.name));
+
+    return h('section', { class: 'card' },
+      h('div', { class: 'card-head' },
+        h('h2', {}, '星取表'),
+        h('span', { class: 'hint' }, `消化 ${done} / ${total} 試合（残り ${total - done} 試合）。マスをクリックして結果を入力`)),
+      h('div', { class: 'table-wrap' }, h('table', { class: 'star' }, h('thead', {}, head), h('tbody', {}, body))),
+      h('div', { class: 'legend' }, '行の選手から見た結果:', legend, h('span', {}, '空欄 = 未実施')));
+  }
+
+  function matchDialog(lg, a, b) {
+    const key = pairKey(a.id, b.id);
+    const now = lg.results[key];
+    const set = res => {
+      if (res) lg.results[key] = res; else delete lg.results[key];
+      save(); render();
+    };
+    const choices = [];
+    for (const o of lg.outcomes) {
+      if (o.kind === 'shared') {
+        choices.push({ title: o.name, sub: `双方 +${fmtPts(o.pts)}`, on: now && now.outcome === o.id, res: { outcome: o.id } });
+      } else {
+        for (const [w, l] of [[a, b], [b, a]]) {
+          choices.push({
+            title: `${w.name} ${o.name}`, sub: `${w.name} +${fmtPts(o.win)} / ${l.name} +${fmtPts(o.lose)}`,
+            on: now && now.outcome === o.id && now.winner === w.id, res: { outcome: o.id, winner: w.id },
+          });
+        }
+      }
+    }
+    openDialog(`${a.name} vs ${b.name}`,
+      h('div', { class: 'choices' }, choices.map(c => h('button', {
+        class: 'btn choice' + (c.on ? ' on' : ''), onclick: () => { set(c.res); dlg.close(); },
+      }, h('span', {}, c.title), h('small', {}, c.sub)))),
+      [
+        { label: '未実施に戻す', onClick: () => set(null) },
+        { label: '閉じる' },
+      ]);
+  }
+
+  function computeStandings(lg) {
+    const ps = lg.participants;
+    const idx = new Map(ps.map((p, i) => [p.id, i]));
+    const rows = ps.map(p => ({ p, pts: 0, played: 0, counts: {} }));
+    const bump = (row, key) => { row.counts[key] = (row.counts[key] || 0) + 1; };
+
+    for (const [key, res] of Object.entries(lg.results)) {
+      const [ida, idb] = key.split('|');
+      const ia = idx.get(ida), ib = idx.get(idb);
+      const o = outcomeOf(lg, res.outcome);
+      if (ia === undefined || ib === undefined || !o) continue;
+      rows[ia].played++; rows[ib].played++;
+      if (o.kind === 'shared') {
+        rows[ia].pts += o.pts; rows[ib].pts += o.pts;
+        bump(rows[ia], o.id + ':s'); bump(rows[ib], o.id + ':s');
+      } else {
+        const [w, l] = res.winner === ida ? [rows[ia], rows[ib]] : [rows[ib], rows[ia]];
+        w.pts += o.win; l.pts += o.lose;
+        bump(w, o.id + ':w'); bump(l, o.id + ':l');
+      }
+    }
+
+    const best = Math.max(0, ...lg.outcomes.map(o => (o.kind === 'shared' ? o.pts : Math.max(o.win, o.lose))));
+    rows.forEach(r => { r.remaining = ps.length - 1 - r.played; r.max = r.pts + r.remaining * best; });
+
+    const sorted = [...rows].sort((x, y) => y.pts - x.pts);
+    sorted.forEach((r, i) => { r.rank = i > 0 && sorted[i - 1].pts === r.pts ? sorted[i - 1].rank : i + 1; });
+
+    const columns = lg.outcomes.flatMap(o => o.kind === 'shared'
+      ? [{ key: o.id + ':s', label: o.mark, title: o.name }]
+      : [{ key: o.id + ':w', label: o.mark, title: `${o.name}(勝者側)` }, { key: o.id + ':l', label: o.loseMark, title: `${o.name}(敗者側)` }]);
+    return { rows: sorted, columns };
+  }
+
+  function cardStandings(lg) {
+    const { rows, columns } = computeStandings(lg);
+    return h('section', { class: 'card' },
+      h('div', { class: 'card-head' },
+        h('h2', {}, '現在の順位'),
+        h('span', { class: 'hint' }, '勝ち点順の暫定順位（同点の直接対決判定は「3. シミュレーション」で行います）')),
+      h('div', { class: 'table-wrap' }, h('table', {},
+        h('thead', {}, h('tr', {},
+          h('th', { class: 'num' }, '順位'), h('th', {}, '選手'), h('th', { class: 'num' }, '勝ち点'),
+          h('th', { class: 'num' }, '消化'), h('th', { class: 'num' }, '残り'), h('th', { class: 'num', title: '残りを全部最高点で取った場合' }, '最大'),
+          columns.map(c => h('th', { class: 'num', title: c.title }, c.label)))),
+        h('tbody', {}, rows.map(r => h('tr', { class: r.rank === 1 ? 'rank-1' : '' },
+          h('td', { class: 'num' }, r.rank), h('td', {}, r.p.name),
+          h('td', { class: 'num' }, h('b', {}, fmtPts(r.pts))),
+          h('td', { class: 'num' }, r.played), h('td', { class: 'num' }, r.remaining), h('td', { class: 'num' }, fmtPts(r.max)),
+          columns.map(c => h('td', { class: 'num' }, r.counts[c.key] || 0))))))));
+  }
+
+  // ─────────────────────────────────────────────
+  // 3. シミュレーションタブ
+  // ─────────────────────────────────────────────
+
+  function targetRange(lg) {
+    const n = Math.min(lg.target.n, lg.participants.length);
+    return lg.target.mode === 'exact' ? { lo: n, hi: n } : { lo: 1, hi: n };
+  }
+
+  function targetLabel(t) {
+    return t.mode === 'exact' ? `ちょうど${t.n}位` : `${t.n}位以内`;
+  }
+
+  function leagueKey(lg) {
+    const s = M.serializeLeague(lg);
+    delete s.name;
+    return JSON.stringify(s);
+  }
+
+  function viewSim(lg) {
+    const n = lg.participants.length;
+    if (n < 2) return emptyCard('参加者を2名以上登録するとシミュレーションできます。');
+    lg.target.n = Math.min(Math.max(lg.target.n, 1), n);
+
+    const sim = state.sim;
+    const prob = E.compile(lg);
+    const total = E.countPatterns(prob);
+    const k = prob.pending.length;
+    const m = prob.options.length;
+    const noOptions = k > 0 && m === 0;
+    const tooMany = total > EXHAUSTIVE_LIMIT;
+
+    const setTarget = patch => { Object.assign(lg.target, patch); save(); render(); };
+    const optionText = lg.outcomes.filter(o => o.simulate).map(o => (o.kind === 'shared' ? o.name : `${o.name}(どちらが勝つか)`)).join('・');
+
+    const targetRow = h('div', { class: 'controls' },
+      h('label', {}, '狙う順位',
+        h('select', { 'aria-label': '順位の条件', value: lg.target.mode, onchange: e => setTarget({ mode: e.target.value }) },
+          h('option', { value: 'within' }, '以内（勝ち抜け）'), h('option', { value: 'exact' }, 'ちょうど'))),
+      h('select', { 'aria-label': '順位', value: String(lg.target.n), onchange: e => setTarget({ n: parseInt(e.target.value, 10) }) },
+        Array.from({ length: n }, (_, i) => h('option', { value: String(i + 1) }, `${i + 1}位`))),
+      h('span', { class: 'muted' }, lg.target.mode === 'exact'
+        ? `ちょうど${lg.target.n}位になる条件を調べます`
+        : `${lg.target.n === 1 ? '1位' : `1〜${lg.target.n}位`}に入る(${lg.target.n}位抜けできる)条件を調べます`));
+
+    const facts = h('div', { class: 'facts' },
+      fact(String(k), '未実施の試合'),
+      fact(String(m), '1試合あたりの結果'),
+      fact(k === 0 ? '1' : fmtBig(total), '全結果パターン'));
+
+    let runUi;
+    if (noOptions) {
+      runUi = h('div', { class: 'notice error' }, '「設定」タブで、未実施試合で起こり得る結果に「予測に含める」のチェックを1つ以上入れてください。');
+    } else if (sim.running) {
+      const bar = h('progress', { max: 1, value: 0 });
+      const label = h('span', { class: 'muted' }, '計算中…');
+      sim.progressEl = { bar, label };
+      if (sim.progress) updateProgress();
+      runUi = h('div', { class: 'controls' }, bar, label,
+        h('button', { class: 'btn', onclick: () => { cancelSim(); render(); } }, '中止'));
+    } else {
+      const parts = [];
+      if (tooMany) {
+        parts.push(h('div', { class: 'notice' },
+          `パターン数が ${fmtBig(total)} 通りと多すぎるため、全網羅はできません。残り試合が減ると全網羅できるようになります。今は、ランダムに抽出した結果から確率を概算できます（条件の一覧は出せません）。`));
+        parts.push(h('div', { class: 'controls' },
+          h('label', {}, '抽出件数',
+            h('input', {
+              type: 'number', min: 1000, step: 100000, value: sim.sampleN, 'aria-label': '抽出件数',
+              onchange: e => { sim.sampleN = Math.min(Math.max(parseInt(e.target.value, 10) || SAMPLE_DEFAULT, 1000), 20000000); },
+            })),
+          h('button', { class: 'btn primary', onclick: () => runSim(lg, 'sample') }, 'ランダム抽出で概算')));
+      } else {
+        const secs = total / 500000; // 実測は端末により 50万〜100万通り/秒
+        parts.push(h('div', { class: 'controls' },
+          h('button', { class: 'btn primary', onclick: () => runSim(lg, 'exhaustive') }, '全パターンを計算'),
+          secs > 3 ? h('span', { class: 'muted' }, `目安: 約${Math.ceil(secs)}秒`) : null));
+      }
+      runUi = parts;
+    }
+
+    const cards = [
+      h('section', { class: 'card' },
+        h('div', { class: 'card-head' }, h('h2', {}, '条件'), h('span', { class: 'hint' }, `未実施試合で数え上げる結果: ${optionText || 'なし'}`)),
+        targetRow, facts, runUi,
+        sim.error ? h('div', { class: 'notice error' }, sim.error) : null,
+        rulesNote()),
+    ];
+    if (sim.result) cards.push(...resultCards(lg));
+    return cards;
+  }
+
+  const fact = (value, label) => h('div', { class: 'fact' }, h('b', {}, value), h('span', {}, label));
+
+  function rulesNote() {
+    return h('details', {},
+      h('summary', {}, '順位の決め方（同点の扱い）'),
+      h('ul', {},
+        h('li', {}, '勝ち点の多い順に並べます。'),
+        h('li', {}, '勝ち点が同じ選手が複数いるときは、その選手たちの間の直接対決だけで勝ち点を数え直して順位を付けます。'),
+        h('li', {}, 'それでも同じ勝ち点が残る選手たち（三すくみなど）には、その選手たちの間でもう一度同じ判定をします。'),
+        h('li', {}, 'どうしても順位が付かない場合は「決定戦が必要」とします。決定戦になる範囲が狙う順位をまたぐ場合だけ、決定戦として数えます（例: 1〜2位が同点で「2位以内」なら、どちらも通過なので確定）。'),
+        h('li', {}, '「決定戦」は結果パターンの数え上げには含めず、確定とは別の列に分けて表示します。')));
+  }
+
+  function updateProgress() {
+    const sim = state.sim;
+    const ui = sim.progressEl;
+    if (!ui || !ui.bar.isConnected || !sim.progress) return;
+    const { done, total } = sim.progress;
+    ui.bar.max = total; ui.bar.value = done;
+    ui.label.textContent = `${fmt(done)} / ${fmt(total)}`;
+  }
+
+  async function runSim(lg, mode) {
+    const sim = state.sim;
+    cancelSim();
+    const problem = E.compile(lg);
+    const { lo, hi } = targetRange(lg);
+    const target = Object.assign({}, lg.target);
+    sim.running = true; sim.progress = null; sim.error = null;
+    sim.detail = null; sim.detailFor = null; sim.detailLimit = DETAIL_PAGE;
+    render();
+
+    const job = startJob(
+      { type: 'run', problem, opts: { mode, lo, hi, sampleN: sim.sampleN, seed: (Date.now() & 0x7fffffff) || 1 } },
+      p => { sim.progress = p; updateProgress(); });
+    sim.job = job;
+    try {
+      const result = await job.promise;
+      sim.result = result;
+      sim.snap = {
+        problem, n: problem.n, names: problem.names, lo, hi, target,
+        outcomes: lg.outcomes.map(o => Object.assign({}, o)),
+      };
+      sim.key = leagueKey(lg);
+    } catch (e) {
+      if (e.message !== 'cancelled') sim.error = '計算に失敗しました: ' + e.message;
+    }
+    if (sim.job === job) { sim.job = null; sim.running = false; render(); }
+  }
+
+  async function loadDetail(focus) {
+    const sim = state.sim;
+    const { problem, lo, hi } = sim.snap;
+    sim.detailLoading = true; sim.detailFor = focus; sim.detail = null; sim.detailLimit = DETAIL_PAGE;
+    render();
+    const job = startJob({ type: 'detail', problem, opts: { focus, lo, hi } });
+    sim.job = job;
+    try {
+      sim.detail = await job.promise;
+    } catch (e) {
+      if (e.message !== 'cancelled') sim.error = '条件の集計に失敗しました: ' + e.message;
+    }
+    if (sim.job === job) { sim.job = null; sim.detailLoading = false; render(); }
+  }
+
+  // ── 結果の表示 ──
+
+  function resultCards(lg) {
+    const sim = state.sim;
+    const { result, snap } = sim;
+    const stale = sim.key !== leagueKey(lg);
+    const cards = [];
+
+    if (stale) {
+      cards.push(h('div', { class: 'notice' }, '星取表や設定が変わっています。下の結果は計算したときの内容です。最新の内容で見るには、もう一度計算してください。'));
+    }
+    const wrap = node => (stale ? h('div', { class: 'stale' }, node) : node);
+
+    cards.push(wrap(cardChances(snap, result, sim)));
+    cards.push(wrap(cardDistribution(snap, result, sim)));
+    if (result.ties.length) cards.push(wrap(cardTies(snap, result)));
+    if (sim.detailFor !== null) cards.push(wrap(cardDetail(snap, result, sim)));
+    return cards;
+  }
+
+  function cardChances(snap, result, sim) {
+    const { names, n } = snap;
+    const done = result.processed;
+    const rows = names.map((name, p) => ({ p, name, c: result.certain[p], po: result.playoff[p] }))
+      .sort((a, b) => (b.c + b.po) - (a.c + a.po) || b.c - a.c || a.p - b.p);
+    const sample = result.mode === 'sample';
+
+    return h('section', { class: 'card' },
+      h('div', { class: 'card-head' },
+        h('h2', {}, `${targetLabel(snap.target)}に入れる可能性`),
+        h('span', { class: 'hint' }, sample
+          ? `ランダム抽出 ${fmt(done)} 件による概算（全 ${fmtBig(result.total)} 通り中）`
+          : `全 ${fmt(done)} 通りを計算`)),
+      h('div', { class: 'table-wrap' }, h('table', {},
+        h('thead', {}, h('tr', {},
+          h('th', {}, '選手'), h('th', {}, ''),
+          h('th', { class: 'num', title: '決定戦なしで条件を満たすパターン' }, '確定'),
+          h('th', { class: 'num', title: '同点で順位が付かず、決定戦に回るパターン' }, '決定戦'),
+          h('th', { class: 'num' }, '合計'), h('th', { class: 'num' }, '可能性'), h('th', {}, ''))),
+        h('tbody', {}, rows.map(r => {
+          const any = r.c + r.po;
+          const status = r.c === done ? h('span', { class: 'chip ok' }, '確定')
+            : any === 0 ? h('span', { class: 'chip ng' }, '可能性なし')
+              : r.c === 0 ? h('span', { class: 'chip warn' }, '決定戦のみ') : null;
+          return h('tr', { class: any === 0 ? 'dim' : '' },
+            h('td', {}, h('b', {}, r.name)), h('td', {}, status),
+            h('td', { class: 'num' }, `${fmt(r.c)} (${pct(r.c, done)})`),
+            h('td', { class: 'num' }, r.po ? `${fmt(r.po)} (${pct(r.po, done)})` : '-'),
+            h('td', { class: 'num' }, fmt(any)),
+            h('td', { class: 'num' }, h('b', {}, pct(any, done))),
+            h('td', {}, !sample && any > 0 && n > 0
+              ? h('button', {
+                class: 'btn small', 'aria-pressed': String(sim.detailFor === r.p),
+                onclick: () => loadDetail(r.p),
+              }, '条件を見る') : null));
+        })))),
+      sample ? h('p', { class: 'muted', style: 'margin:8px 0 0' }, '概算のため件数は目安です。残り試合が減ると全パターンの計算と条件の一覧が使えます。') : null);
+  }
+
+  function cardDistribution(snap, result, sim) {
+    const { names, n } = snap;
+    const done = result.processed;
+    const cellOf = (p, r) => {
+      const v = result.hist[p * (n + 1) + r];
+      if (!v) return h('td', { class: 'num muted' }, '·');
+      return h('td', { class: 'num heat', style: `--p:${v / done}`, title: `${fmt(v)}通り (${pct(v, done)})` },
+        sim.pctMode ? pct(v, done) : fmt(v));
+    };
+    const rows = [];
+    for (let r = 1; r <= n; r++) rows.push(h('tr', {}, h('th', { scope: 'row' }, `${r}位`), names.map((_, p) => cellOf(p, r))));
+
+    return h('section', { class: 'card' },
+      h('div', { class: 'card-head' },
+        h('h2', {}, '順位の分布'),
+        h('div', { class: 'seg', role: 'group', 'aria-label': '表示' },
+          h('button', { 'aria-pressed': String(!sim.pctMode), onclick: () => { sim.pctMode = false; render(); } }, '件数'),
+          h('button', { 'aria-pressed': String(sim.pctMode), onclick: () => { sim.pctMode = true; render(); } }, '割合'))),
+      h('div', { class: 'table-wrap' }, h('table', { class: 'dist' },
+        h('thead', {}, h('tr', {}, h('th', {}, ''), names.map(nm => h('th', { class: 'vh' }, nm)))),
+        h('tbody', {}, rows))),
+      h('p', { class: 'muted', style: 'margin:8px 0 0' },
+        '決着のつかない同順位グループは、グループの先頭の順位として数えます（例: 3人が2位タイなら3人とも「2位」）。'));
+  }
+
+  const namesOf = (names, mask, except) => names.filter((_, i) => (mask & (1 << i)) && i !== except);
+
+  function cardTies(snap, result) {
+    const { names } = snap;
+    const done = result.processed;
+    const total = result.ties.reduce((s, t) => s + t.count, 0);
+    const rows = [...result.ties].sort((a, b) => b.count - a.count).map(t => h('tr', {},
+      h('td', {}, namesOf(names, t.mask).join('・')),
+      h('td', { class: 'num' }, fmt(t.count)), h('td', { class: 'num' }, pct(t.count, done))));
+    return h('section', { class: 'card' },
+      h('div', { class: 'card-head' },
+        h('h2', {}, '決定戦が必要になる組み合わせ'),
+        h('span', { class: 'hint' }, `${targetLabel(snap.target)}の境目で、同点・直接対決でも決着しない ${fmt(total)} 通り`)),
+      h('div', { class: 'table-wrap' }, h('table', {},
+        h('thead', {}, h('tr', {}, h('th', {}, '同順位になる選手'), h('th', { class: 'num' }, 'パターン数'), h('th', { class: 'num' }, '割合'))),
+        h('tbody', {}, rows))));
+  }
+
+  function optionNode(snap, pair, optIndex, focus) {
+    const opt = snap.problem.options[optIndex];
+    const o = snap.outcomes.find(x => x.id === opt.outcome);
+    if (opt.winner === null) return o.name;
+    const w = opt.winner === 'i' ? pair.i : pair.j;
+    return h('span', { class: w === focus ? 'me' : '' }, `${snap.names[w]} ${o.mark}`);
+  }
+
+  function cardDetail(snap, result, sim) {
+    const focus = sim.detailFor;
+    const name = snap.names[focus];
+    const title = `${name} が ${targetLabel(snap.target)} に入る条件`;
+    const head = h('div', { class: 'card-head' }, h('h2', {}, title));
+
+    if (sim.detailLoading || !sim.detail) {
+      return h('section', { class: 'card' }, head, h('p', { class: 'muted' }, '集計中…'));
+    }
+    const d = sim.detail;
+    const all = [];
+    for (const row of d.certain.rows) all.push({ kind: 'certain', row });
+    for (const g of d.playoffs) for (const row of g.rows) all.push({ kind: 'playoff', row, mask: g.mask });
+
+    const used = new Set();
+    all.forEach(x => x.row.cells.forEach((c, v) => { if (c) used.add(v); }));
+    const cols = [...used].sort((a, b) => a - b);
+    const pairOf = v => snap.problem.pending[d.order[v]];
+
+    const playoffTotal = d.playoffs.reduce((s, g) => s + g.count, 0);
+    const summary = h('p', {},
+      `全 ${fmt(result.processed)} 通りのうち、`,
+      h('b', {}, `確定 ${fmt(d.certain.count)} 通り`),
+      playoffTotal ? [' + ', h('b', {}, `決定戦 ${fmt(playoffTotal)} 通り`)] : null, '。',
+      ' 表の1行は、その行の条件を満たす結果パターンをまとめたものです。「—」はどの結果でもよいことを表します。');
+
+    const notes = [];
+    if (d.overflow) notes.push(h('div', { class: 'notice' }, '該当するパターンが多すぎるため、途中で集計を打ち切っています。下の表は一部です。'));
+    if (d.certain.truncated || d.playoffs.some(g => g.truncated)) {
+      notes.push(h('div', { class: 'notice' }, '条件の行数が多すぎるため、一部の行のみを表示しています。'));
+    }
+
+    if (!all.length) {
+      return h('section', { class: 'card' }, head, summary, h('p', { class: 'muted' }, '該当するパターンはありません。'));
+    }
+    if (!cols.length && all.length === 1) {
+      const only = all[0];
+      const what = only.kind === 'certain' ? '残りの試合がどんな結果でも確定します' : '残りの試合がどんな結果でも決定戦になります';
+      return h('section', { class: 'card' }, head, summary, notes, h('p', {}, what + '。'));
+    }
+
+    const shown = all.slice(0, sim.detailLimit);
+    const thead = h('tr', {},
+      h('th', {}, '#'),
+      cols.map(v => {
+        const pr = pairOf(v);
+        return h('th', { class: 'mh' }, snap.names[pr.i], h('i', {}, 'vs'), snap.names[pr.j]);
+      }),
+      h('th', {}, '判定'), h('th', { class: 'num' }, 'パターン数'));
+    const tbody = shown.map((x, idx) => h('tr', {},
+      h('td', { class: 'muted' }, idx + 1),
+      cols.map(v => {
+        const c = x.row.cells[v];
+        if (!c) return h('td', { class: 'mc any' }, '—');
+        const nodes = [];
+        c.forEach((o, i) => { if (i) nodes.push(' / '); nodes.push(optionNode(snap, pairOf(v), o, focus)); });
+        return h('td', { class: 'mc' }, nodes);
+      }),
+      h('td', {}, x.kind === 'certain'
+        ? h('span', { class: 'chip ok' }, '確定')
+        : h('span', { class: 'chip warn' }, `決定戦 vs ${namesOf(snap.names, x.mask, focus).join('・')}`)),
+      h('td', { class: 'num' }, fmt(x.row.count))));
+
+    return h('section', { class: 'card pat' }, head, summary, notes,
+      h('div', { class: 'table-wrap' }, h('table', {}, h('thead', {}, thead), h('tbody', {}, tbody))),
+      all.length > shown.length
+        ? h('div', { style: 'margin-top:10px' },
+          h('button', { class: 'btn', onclick: () => { sim.detailLimit += DETAIL_PAGE; render(); } },
+            `さらに表示（残り ${fmt(all.length - shown.length)} 行）`))
+        : null);
+  }
+
+  // ─────────────────────────────────────────────
+  // インポート / エクスポート
+  // ─────────────────────────────────────────────
+
+  function download(filename, text) {
+    const url = URL.createObjectURL(new Blob([text], { type: 'application/json' }));
+    const a = h('a', { href: url, download: filename });
+    document.body.append(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  const safeName = s => s.replace(/[\\/:*?"<>|]/g, '_');
+
+  function loadSample() {
+    const [lg] = M.parseImport(SAMPLE_TEXT, SAMPLE_NAME + '.txt');
+    lg.target = { mode: 'within', n: 2 };
+    state.leagues.push(lg);
+    cancelSim();
+    state.currentId = lg.id;
+    state.sim = freshSim();
+    state.tab = 'board';
+    save(); render();
+    toast('サンプルを読み込みました');
+  }
+
+  function ioDialog() {
+    const lg = cur();
+    const file = h('input', { type: 'file', accept: '.json,.txt,text/plain,application/json', 'aria-label': '読み込むファイル' });
+    const paste = h('textarea', { placeholder: 'ここにJSONやテキストを貼り付けることもできます', 'aria-label': '貼り付け' });
+    const replace = h('input', { type: 'checkbox' });
+
+    const doImport = async () => {
+      try {
+        let text = paste.value.trim(), fileName = '';
+        if (!text && file.files[0]) { text = await file.files[0].text(); fileName = file.files[0].name; }
+        if (!text) { toast('ファイルを選ぶか、内容を貼り付けてください'); return true; }
+        const imported = M.parseImport(text, fileName);
+        if (replace.checked) {
+          const ok = await confirmDialog('今あるリーグをすべて消して、読み込んだ内容に置き換えます。', '置き換える', true);
+          if (!ok) return true;
+          state.leagues = imported;
+        } else {
+          state.leagues.push(...imported);
+        }
+        cancelSim();
+        state.currentId = imported[0].id;
+        state.sim = freshSim();
+        state.tab = imported[0].participants.length ? 'board' : 'setup';
+        save(); render();
+        toast(`${imported.length}件のリーグを読み込みました`);
+      } catch (e) {
+        openDialog('読み込めませんでした', h('p', { style: 'white-space:pre-wrap' }, e.message), [{ label: '戻る', onClick: () => { ioDialog(); return true; } }]);
+        return true;
+      }
+    };
+
+    openDialog('インポート / エクスポート', [
+      h('h3', {}, 'エクスポート（ファイルに保存）'),
+      h('div', { class: 'row' },
+        h('button', { class: 'btn', onclick: () => download(safeName(lg.name) + '.json', JSON.stringify(M.exportFile([lg]), null, 2)) }, '表示中のリーグ'),
+        h('button', { class: 'btn', onclick: () => download(`league-simulator-${new Date().toISOString().slice(0, 10)}.json`, JSON.stringify(M.exportFile(state.leagues), null, 2)) }, `すべてのリーグ(${state.leagues.length}件)`)),
+      h('h3', {}, 'インポート'),
+      h('p', { class: 'muted' }, 'このアプリで保存した .json のほか、「竹下 > 後藤」形式のテキストや星取マトリクス形式の .json も読み込めます。'),
+      file, h('div', { style: 'height:8px' }), paste,
+      h('label', { class: 'row', style: 'margin-top:8px' }, replace, '今あるリーグを置き換える（オフなら追加）'),
+      h('h3', {}, 'サンプル'),
+      h('button', { class: 'btn', onclick: () => { dlg.close(); loadSample(); } }, 'G1 Aブロックのサンプルを追加'),
+    ], [
+      { label: '閉じる' },
+      { label: '読み込む', cls: 'primary', onClick: doImport },
+    ]);
+  }
+
+  // ─────────────────────────────────────────────
+
+  load();
+  render();
+})();
