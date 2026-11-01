@@ -117,7 +117,8 @@ SANADA < 大岩
   dlg.addEventListener('click', e => { if (e.target === dlg) dlg.close(); });
 
   /** buttons: [{label, cls, onClick}] — onClick が true を返すと閉じない */
-  function openDialog(title, body, buttons) {
+  function openDialog(title, body, buttons, opts) {
+    dlg.classList.toggle('wide', !!(opts && opts.wide));
     dlg.replaceChildren(
       h('div', { class: 'dlg-head' }, title),
       h('div', { class: 'dlg-body' }, body),
@@ -549,15 +550,19 @@ SANADA < 大岩
     return [cardStarTable(lg), cardStandings(lg)];
   }
 
-  function cellInfo(lg, r, c) {
-    const ps = lg.participants;
-    const res = lg.results[pairKey(ps[r].id, ps[c].id)];
-    const o = res && outcomeOf(lg, res.outcome);
+  // 1試合の結果 res を、rowId の選手から見た星取表のマスにする
+  function cellFromResult(outcomes, res, rowId) {
+    const o = res && outcomes.find(x => x.id === res.outcome);
     if (!o) return { text: '', cls: 'cell-pending', label: '未実施' };
     if (o.kind === 'shared') return { text: o.mark, cls: 'cell-shared', label: o.name };
-    return res.winner === ps[r].id
+    return res.winner === rowId
       ? { text: o.mark, cls: 'cell-win', label: o.mark }
       : { text: o.loseMark, cls: 'cell-lose', label: o.loseMark };
+  }
+
+  function cellInfo(lg, r, c) {
+    const ps = lg.participants;
+    return cellFromResult(lg.outcomes, lg.results[pairKey(ps[r].id, ps[c].id)], ps[r].id);
   }
 
   function cardStarTable(lg) {
@@ -590,6 +595,11 @@ SANADA < 大岩
       h('div', { class: 'legend' }, '行の選手から見た結果:', legend, h('span', {}, '空欄 = 未実施')));
   }
 
+  // 「勝ち」の裏側の呼び名（勝ち→負け、反則勝ち→反則負け）。「勝」を含まない名前は「〜(負け側)」
+  function loseName(o) {
+    return /勝ち?$/.test(o.name) ? o.name.replace(/勝ち?$/, '負け') : `${o.name}(負け側)`;
+  }
+
   function matchDialog(lg, a, b) {
     const key = pairKey(a.id, b.id);
     const now = lg.results[key];
@@ -602,12 +612,15 @@ SANADA < 大岩
       if (o.kind === 'shared') {
         choices.push({ title: o.name, sub: `双方 +${fmtPts(o.pts)}`, on: now && now.outcome === o.id, res: { outcome: o.id } });
       } else {
-        for (const [w, l] of [[a, b], [b, a]]) {
-          choices.push({
-            title: `${w.name} ${o.name}`, sub: `${w.name} +${fmtPts(o.win)} / ${l.name} +${fmtPts(o.lose)}`,
-            on: now && now.outcome === o.id && now.winner === w.id, res: { outcome: o.id, winner: w.id },
-          });
-        }
+        // 常にAを主にして表現する（A 勝ち / A 負け）
+        choices.push({
+          title: `${a.name} ${o.name}`, sub: `${a.name} +${fmtPts(o.win)} / ${b.name} +${fmtPts(o.lose)}`,
+          on: now && now.outcome === o.id && now.winner === a.id, res: { outcome: o.id, winner: a.id },
+        });
+        choices.push({
+          title: `${a.name} ${loseName(o)}`, sub: `${a.name} +${fmtPts(o.lose)} / ${b.name} +${fmtPts(o.win)}`,
+          on: now && now.outcome === o.id && now.winner === b.id, res: { outcome: o.id, winner: b.id },
+        });
       }
     }
     openDialog(`${a.name} vs ${b.name}`,
@@ -806,6 +819,8 @@ SANADA < 大岩
       sim.snap = {
         problem, n: problem.n, names: problem.names, lo, hi, target,
         outcomes: lg.outcomes.map(o => Object.assign({}, o)),
+        // 確定済みの結果(星取表の再現用)。計算後に入力が変わっても、計算時点のまま描画できるよう複製する
+        league: JSON.parse(JSON.stringify({ participants: lg.participants, results: lg.results })),
       };
       sim.key = leagueKey(lg);
     } catch (e) {
@@ -843,9 +858,9 @@ SANADA < 大岩
     const wrap = node => (stale ? h('div', { class: 'stale' }, node) : node);
 
     cards.push(wrap(cardChances(snap, result, sim)));
-    cards.push(wrap(cardDistribution(snap, result, sim)));
-    if (result.ties.length) cards.push(wrap(cardTies(snap, result)));
     if (sim.detailFor !== null) cards.push(wrap(cardDetail(snap, result, sim)));
+    if (result.ties.length) cards.push(wrap(cardTies(snap, result)));
+    cards.push(wrap(cardDistribution(snap, result, sim)));
     return cards;
   }
 
@@ -963,7 +978,8 @@ SANADA < 大岩
       `全 ${fmt(result.processed)} 通りのうち、`,
       h('b', {}, `確定 ${fmt(d.certain.count)} 通り`),
       playoffTotal ? [' + ', h('b', {}, `決定戦 ${fmt(playoffTotal)} 通り`)] : null, '。',
-      ' 表の1行は、その行の条件を満たす結果パターンをまとめたものです。「—」はどの結果でもよいことを表します。');
+      ' 表の1行は、その行の条件を満たす結果パターンをまとめたものです。「—」はどの結果でもよいことを表します。',
+      ' パターン数をクリックすると、該当する結果を星取表ですべて表示します。');
 
     const notes = [];
     if (d.overflow) notes.push(h('div', { class: 'notice' }, '該当するパターンが多すぎるため、途中で集計を打ち切っています。下の表は一部です。'));
@@ -1000,7 +1016,10 @@ SANADA < 大岩
       h('td', {}, x.kind === 'certain'
         ? h('span', { class: 'chip ok' }, '確定')
         : h('span', { class: 'chip warn' }, `決定戦 vs ${namesOf(snap.names, x.mask, focus).join('・')}`)),
-      h('td', { class: 'num' }, fmt(x.row.count))));
+      h('td', { class: 'num' }, h('button', {
+        class: 'linkish', title: 'この条件に当てはまる結果を、星取表ですべて見る',
+        onclick: () => showBoards(snap, d, x),
+      }, fmt(x.row.count)))));
 
     return h('section', { class: 'card pat' }, head, summary, notes,
       h('div', { class: 'table-wrap' }, h('table', {}, h('thead', {}, thead), h('tbody', {}, tbody))),
@@ -1009,6 +1028,114 @@ SANADA < 大岩
           h('button', { class: 'btn', onclick: () => { sim.detailLimit += DETAIL_PAGE; render(); } },
             `さらに表示（残り ${fmt(all.length - shown.length)} 行）`))
         : null);
+  }
+
+  /**
+   * 条件の1行(x)に当てはまる結果パターンを、全試合が埋まった星取表としてすべて描画する。
+   * 未実施だった試合(シミュレーションした結果)のマスは暖色の背景にする。
+   * 件数が多くても固まらないよう、スクロールに合わせて少しずつ描画する。
+   */
+  function showBoards(snap, d, x) {
+    const { names, n, problem, league, outcomes } = snap;
+    const ps = league.participants;
+    const { options } = problem;
+    const pend = d.order.map(i => problem.pending[i]);
+    const k = pend.length;
+    // 試合ごとの取り得る結果。条件で「どれでもよい」(null)の試合は全結果
+    const sets = x.row.cells.map(c => c || options.map((_, o) => o));
+    const total = x.row.count;
+    const focus = d.focus;
+
+    const pts = new Float64Array(n);
+    const h2h = new Float64Array(n * n);
+    const ranker = E.makeRanker(n, pts, h2h);
+    const simOpt = new Int32Array(n * n);
+
+    function buildBoard(idx) {
+      // idx 番目の組み合わせ(各試合の結果の選び方)を、桁ごとに取り出す
+      let rest = idx;
+      pts.set(problem.basePts); h2h.set(problem.h2h); simOpt.fill(-1);
+      for (let v = k - 1; v >= 0; v--) {
+        const s = sets[v];
+        const o = s[rest % s.length];
+        rest = Math.floor(rest / s.length);
+        const { i, j } = pend[v];
+        const opt = options[o];
+        pts[i] += opt.pi; pts[j] += opt.pj;
+        h2h[i * n + j] = opt.pi; h2h[j * n + i] = opt.pj;
+        simOpt[i * n + j] = o;
+      }
+      ranker.rank();
+
+      const head = h('tr', {}, h('th', {}),
+        names.map(nm => h('th', { scope: 'col' }, h('div', { class: 'vname' }, nm))),
+        h('th', { class: 'rk' }, '勝ち点'), h('th', { class: 'rk' }, '順位'));
+      const body = names.map((nm, r) => {
+        const cells = names.map((_, c) => {
+          if (r === c) return h('td', { class: 'self' });
+          const i = Math.min(r, c), j = Math.max(r, c);
+          const so = simOpt[i * n + j];
+          let info;
+          if (so >= 0) {
+            const opt = options[so];
+            const winner = opt.winner === 'i' ? ps[i].id : opt.winner === 'j' ? ps[j].id : undefined;
+            info = cellFromResult(outcomes, { outcome: opt.outcome, winner }, ps[r].id);
+            info.cls += ' sim';
+          } else {
+            info = cellFromResult(outcomes, league.results[pairKey(ps[r].id, ps[c].id)], ps[r].id);
+          }
+          return h('td', { class: info.cls, title: so >= 0 ? 'シミュレーションした結果' : null }, info.text);
+        });
+        const s = ranker.posStart[r], z = ranker.posSize[r];
+        return h('tr', { class: r === focus ? 'focus' : '' },
+          h('th', { scope: 'row', class: 'rname' }, nm), cells,
+          h('td', { class: 'rk' }, fmtPts(pts[r] / E.SCALE)),
+          h('td', { class: 'rk' + (z > 1 ? ' tie' : ''), title: z > 1 ? '同点で決着がつかない(決定戦)' : null },
+            z > 1 ? `${s}〜${s + z - 1}位` : `${s}位`));
+      });
+      return h('div', { class: 'board' },
+        h('div', { class: 'board-no' }, `#${fmt(idx + 1)}`),
+        h('div', { class: 'table-wrap' }, h('table', { class: 'star mini' }, h('thead', {}, head), h('tbody', {}, body))));
+    }
+
+    const verdict = x.kind === 'certain'
+      ? h('span', { class: 'chip ok' }, '確定')
+      : h('span', { class: 'chip warn' }, `決定戦 vs ${namesOf(names, x.mask, focus).join('・')}`);
+    const legend = h('div', { class: 'legend', style: 'margin:8px 0 12px' },
+      h('span', {}, h('span', { class: 'sw sim' }, '勝'), '暖色のマス = 未実施だった試合のシミュレーション結果'),
+      outcomes.map(o => (o.kind === 'shared'
+        ? h('span', {}, h('span', { class: 'sw cell-shared' }, o.mark), o.name)
+        : h('span', {}, h('span', { class: 'sw cell-win' }, o.mark), h('span', { class: 'sw cell-lose' }, o.loseMark), o.name))));
+
+    const grid = h('div', { class: 'boards' });
+    const status = h('div', { class: 'muted', style: 'text-align:center;padding:10px' });
+    let shown = 0;
+    const appendChunk = () => {
+      const end = Math.min(shown + 12, total);
+      const frag = document.createDocumentFragment();
+      for (; shown < end; shown++) frag.append(buildBoard(shown));
+      grid.append(frag);
+      status.textContent = shown < total
+        ? `${fmt(shown)} / ${fmt(total)} 件を表示中（下にスクロールすると続きを表示します）`
+        : `全 ${fmt(total)} 件を表示しました`;
+    };
+
+    const body = h('div', {},
+      h('div', { class: 'row' }, verdict, h('span', {}, `該当する結果 ${fmt(total)} 通り`)),
+      legend, grid, status);
+    openDialog(`${names[focus]} が ${targetLabel(snap.target)} に入る結果`, body, [{ label: '閉じる', cls: 'primary' }], { wide: true });
+
+    const scroller = body.parentElement;
+    const pump = () => {
+      if (!grid.isConnected || shown >= total) return;
+      if (status.getBoundingClientRect().top < scroller.getBoundingClientRect().bottom + 800) {
+        appendChunk();
+        requestAnimationFrame(pump);
+      }
+    };
+    scroller.addEventListener('scroll', pump, { passive: true });
+    appendChunk();
+    requestAnimationFrame(pump);
   }
 
   // ─────────────────────────────────────────────

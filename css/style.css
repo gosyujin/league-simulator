@@ -15,6 +15,8 @@
   --shared-bg: #fdf0cc;
   --warn-bg: #fff4d6;
   --warn-ink: #7a5300;
+  --sim-bg: #ffd2a3;
+  --sim-ink: #7a3300;
   --danger: #c0392b;
   --radius: 10px;
   --shadow: 0 1px 2px rgb(16 24 40 / 6%), 0 1px 3px rgb(16 24 40 / 8%);
@@ -39,6 +41,8 @@
     --shared-bg: #3a2f12;
     --warn-bg: #3a2f12;
     --warn-ink: #f1c75b;
+    --sim-bg: #5c3414;
+    --sim-ink: #ffc48a;
     --danger: #f08a80;
     --shadow: none;
     color-scheme: dark;
@@ -170,11 +174,34 @@ tr.dim td { color: var(--muted); }
 
 .rank-1 td:first-child { font-weight: 700; }
 
+/* シミュレーションで仮定した結果のマス（暖色） */
+.sim { background: var(--sim-bg); color: var(--sim-ink); }
+
+/* 全パターンの星取表 */
+.boards { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(min(100%, 560px), 1fr)); }
+.board { border: 1px solid var(--line); border-radius: 8px; padding: 8px; min-width: 0; }
+.board-no { color: var(--muted); font-size: .8rem; font-weight: 600; margin-bottom: 4px; }
+.star.mini { margin: 0; }
+.star.mini td { width: 1.8rem; min-width: 1.8rem; height: 1.8rem; font-size: .8rem; font-weight: 700; }
+.star.mini .vname { font-size: .72rem; max-height: 7.5em; padding: 4px 1px; }
+.star.mini .rname { padding: 0 8px; font-size: .8rem; }
+.star.mini .rk { padding: 0 8px; white-space: nowrap; font-size: .8rem; text-align: right; background: var(--surface-2); font-variant-numeric: tabular-nums; }
+.star.mini td.rk { font-weight: 600; }
+.star.mini td.rk.tie { color: var(--shared); }
+.star.mini tr.focus .rname, .star.mini tr.focus .rk { color: var(--accent); }
+.star.mini tr.focus .rname { box-shadow: inset 3px 0 0 var(--accent); }
+
+.linkish {
+  appearance: none; border: 0; background: none; padding: 0; font: inherit; font-weight: 700;
+  color: var(--accent); text-decoration: underline; text-underline-offset: 2px; cursor: pointer;
+}
+
 /* ── ダイアログ ── */
 dialog {
   border: 1px solid var(--line); border-radius: 14px; padding: 0; background: var(--surface); color: var(--text);
   width: min(92vw, 520px); max-height: 88vh; box-shadow: 0 20px 50px rgb(0 0 0 / 30%);
 }
+dialog.wide { width: min(96vw, 1240px); }
 dialog::backdrop { background: rgb(10 14 22 / 55%); }
 .dlg-head { padding: 14px 18px 4px; font-weight: 700; font-size: 1.05rem; }
 .dlg-body { padding: 8px 18px 12px; overflow-y: auto; max-height: calc(88vh - 130px); }
