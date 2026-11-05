@@ -33,7 +33,7 @@
     return [
       { id: 'win', name: '勝ち', kind: 'decisive', win: 2, lose: 0, mark: '○', loseMark: '●', simulate: true },
       { id: 'draw', name: '引き分け', kind: 'shared', pts: 1, mark: '△', simulate: false },
-      { id: 'void', name: '無効試合', kind: 'shared', pts: 1, mark: '─', simulate: false },
+      { id: 'void', name: '無効試合', kind: 'shared', pts: 0, mark: '─', simulate: false },
       { id: 'forfeit', name: '不戦勝', kind: 'decisive', win: 2, lose: 0, mark: '◻', loseMark: '▪', simulate: false },
     ];
   }
