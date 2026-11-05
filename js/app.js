@@ -5,7 +5,9 @@
   const E = window.LeagueEngine;
   const M = window.LeagueModel;
   const G = window.LeagueGist;
+  const B = window.LeagueBoards;
   const { pairKey } = E;
+  const { fmt, fmtPts, namesOf, targetLabel, cellFromResult } = B;
 
   const STORAGE_KEY = 'league-simulator:v1';
   const EXHAUSTIVE_LIMIT = 20000000;   // これを超える場合は全網羅せずランダム抽出にする
@@ -88,8 +90,6 @@ SANADA < 大岩
     return el;
   }
 
-  const fmt = v => v.toLocaleString('ja-JP');
-  const fmtPts = v => String(Math.round(v * 1000) / 1000);
   function fmtBig(v) {
     if (v < 1e12) return fmt(v);
     const exp = Math.floor(Math.log10(v));
@@ -574,16 +574,6 @@ SANADA < 大岩
     return [cardStarTable(lg), cardStandings(lg)];
   }
 
-  // 1試合の結果 res を、rowId の選手から見た星取表のマスにする
-  function cellFromResult(outcomes, res, rowId) {
-    const o = res && outcomes.find(x => x.id === res.outcome);
-    if (!o) return { text: '', cls: 'cell-pending', label: '未実施' };
-    if (o.kind === 'shared') return { text: o.mark, cls: 'cell-shared', label: o.name };
-    return res.winner === rowId
-      ? { text: o.mark, cls: 'cell-win', label: o.mark }
-      : { text: o.loseMark, cls: 'cell-lose', label: o.loseMark };
-  }
-
   function cellInfo(lg, r, c) {
     const ps = lg.participants;
     return cellFromResult(lg.outcomes, lg.results[pairKey(ps[r].id, ps[c].id)], ps[r].id);
@@ -727,10 +717,6 @@ SANADA < 大岩
   function rangeOf(target, count) {
     const n = Math.min(target.n, count);
     return target.mode === 'exact' ? { lo: n, hi: n } : { lo: 1, hi: n };
-  }
-
-  function targetLabel(t) {
-    return t.mode === 'exact' ? `ちょうど${t.n}位` : `${t.n}位以内`;
   }
 
   // 「どんな条件を調べるか」の説明文
@@ -978,8 +964,6 @@ SANADA < 大岩
         '決着のつかない同順位グループは、グループの先頭の順位として数えます（例: 3人が2位タイなら3人とも「2位」）。'));
   }
 
-  const namesOf = (names, mask, except) => names.filter((_, i) => (mask & (1 << i)) && i !== except);
-
   function cardTies(snap, result) {
     const { names } = snap;
     const done = result.processed;
@@ -1003,6 +987,8 @@ SANADA < 大岩
     const w = opt.winner === 'i' ? pair.i : pair.j;
     return h('span', { class: w === focus ? 'me' : '' }, `${snap.names[w]} ${o.mark}`);
   }
+
+  const boardsDialog = (title, body) => openDialog(title, body, [{ label: '閉じる', cls: 'primary' }], { wide: true });
 
   const condId = p => `cond-${p}`;
 
@@ -1033,7 +1019,7 @@ SANADA < 大岩
       h('b', {}, `確定 ${fmt(d.certain.count)} 通り`),
       playoffTotal ? [' + ', h('b', {}, `決定戦 ${fmt(playoffTotal)} 通り`)] : null, '。',
       ' 表の1行は、その行の条件を満たす結果パターンをまとめたものです。「—」はどの結果でもよいことを表します。',
-      sim.static ? null : ' パターン数をクリックすると、該当する結果を星取表ですべて表示します。');
+      ' パターン数をクリックすると、該当する結果を星取表ですべて表示します。');
 
     const notes = [];
     if (d.overflow) notes.push(h('div', { class: 'notice' }, '該当するパターンが多すぎるため、途中で集計を打ち切っています。下の表は一部です。'));
@@ -1070,9 +1056,11 @@ SANADA < 大岩
       h('td', {}, x.kind === 'certain'
         ? h('span', { class: 'chip ok' }, '確定')
         : h('span', { class: 'chip warn' }, `決定戦 vs ${namesOf(snap.names, x.mask, focus).join('・')}`)),
-      h('td', { class: 'num' }, sim.static ? fmt(x.row.count) : h('button', {
+      h('td', { class: 'num' }, h('button', {
         class: 'linkish', title: 'この条件に当てはまる結果を、星取表ですべて見る',
-        onclick: () => showBoards(snap, d, x),
+        // 静的HTMLでは、ページ内のスクリプトがこの属性から該当の行を探して開く
+        'data-p': sim.static ? String(focus) : null, 'data-r': sim.static ? String(idx) : null,
+        onclick: sim.static ? null : () => B.show(snap, d, x, boardsDialog),
       }, fmt(x.row.count)))));
 
     return h('section', cardAttrs('card pat'), head, summary, notes,
@@ -1082,114 +1070,6 @@ SANADA < 大岩
           h('button', { class: 'btn', onclick: () => { sim.detailLimit += DETAIL_PAGE; render(); } },
             `さらに表示（残り ${fmt(all.length - shown.length)} 行）`))
         : null);
-  }
-
-  /**
-   * 条件の1行(x)に当てはまる結果パターンを、全試合が埋まった星取表としてすべて描画する。
-   * 未実施だった試合(シミュレーションした結果)のマスは暖色の背景にする。
-   * 件数が多くても固まらないよう、スクロールに合わせて少しずつ描画する。
-   */
-  function showBoards(snap, d, x) {
-    const { names, n, problem, league, outcomes } = snap;
-    const ps = league.participants;
-    const { options } = problem;
-    const pend = d.order.map(i => problem.pending[i]);
-    const k = pend.length;
-    // 試合ごとの取り得る結果。条件で「どれでもよい」(null)の試合は全結果
-    const sets = x.row.cells.map(c => c || options.map((_, o) => o));
-    const total = x.row.count;
-    const focus = d.focus;
-
-    const pts = new Float64Array(n);
-    const h2h = new Float64Array(n * n);
-    const ranker = E.makeRanker(n, pts, h2h);
-    const simOpt = new Int32Array(n * n);
-
-    function buildBoard(idx) {
-      // idx 番目の組み合わせ(各試合の結果の選び方)を、桁ごとに取り出す
-      let rest = idx;
-      pts.set(problem.basePts); h2h.set(problem.h2h); simOpt.fill(-1);
-      for (let v = k - 1; v >= 0; v--) {
-        const s = sets[v];
-        const o = s[rest % s.length];
-        rest = Math.floor(rest / s.length);
-        const { i, j } = pend[v];
-        const opt = options[o];
-        pts[i] += opt.pi; pts[j] += opt.pj;
-        h2h[i * n + j] = opt.pi; h2h[j * n + i] = opt.pj;
-        simOpt[i * n + j] = o;
-      }
-      ranker.rank();
-
-      const head = h('tr', {}, h('th', {}),
-        names.map(nm => h('th', { scope: 'col' }, h('div', { class: 'vname' }, nm))),
-        h('th', { class: 'rk' }, '勝ち点'), h('th', { class: 'rk' }, '順位'));
-      const body = names.map((nm, r) => {
-        const cells = names.map((_, c) => {
-          if (r === c) return h('td', { class: 'self' });
-          const i = Math.min(r, c), j = Math.max(r, c);
-          const so = simOpt[i * n + j];
-          let info;
-          if (so >= 0) {
-            const opt = options[so];
-            const winner = opt.winner === 'i' ? ps[i].id : opt.winner === 'j' ? ps[j].id : undefined;
-            info = cellFromResult(outcomes, { outcome: opt.outcome, winner }, ps[r].id);
-            info.cls += ' sim';
-          } else {
-            info = cellFromResult(outcomes, league.results[pairKey(ps[r].id, ps[c].id)], ps[r].id);
-          }
-          return h('td', { class: info.cls, title: so >= 0 ? 'シミュレーションした結果' : null }, info.text);
-        });
-        const s = ranker.posStart[r], z = ranker.posSize[r];
-        return h('tr', { class: r === focus ? 'focus' : '' },
-          h('th', { scope: 'row', class: 'rname' }, nm), cells,
-          h('td', { class: 'rk' }, fmtPts(pts[r] / E.SCALE)),
-          h('td', { class: 'rk' + (z > 1 ? ' tie' : ''), title: z > 1 ? '同点で決着がつかない(決定戦)' : null },
-            z > 1 ? `${s}〜${s + z - 1}位` : `${s}位`));
-      });
-      return h('div', { class: 'board' },
-        h('div', { class: 'board-no' }, `#${fmt(idx + 1)}`),
-        h('div', { class: 'table-wrap' }, h('table', { class: 'star mini' }, h('thead', {}, head), h('tbody', {}, body))));
-    }
-
-    const verdict = x.kind === 'certain'
-      ? h('span', { class: 'chip ok' }, '確定')
-      : h('span', { class: 'chip warn' }, `決定戦 vs ${namesOf(names, x.mask, focus).join('・')}`);
-    const legend = h('div', { class: 'legend', style: 'margin:8px 0 12px' },
-      h('span', {}, h('span', { class: 'sw sim' }, '勝'), '暖色のマス = 未実施だった試合のシミュレーション結果'),
-      outcomes.map(o => (o.kind === 'shared'
-        ? h('span', {}, h('span', { class: 'sw cell-shared' }, o.mark), o.name)
-        : h('span', {}, h('span', { class: 'sw cell-win' }, o.mark), h('span', { class: 'sw cell-lose' }, o.loseMark), o.name))));
-
-    const grid = h('div', { class: 'boards' });
-    const status = h('div', { class: 'muted', style: 'text-align:center;padding:10px' });
-    let shown = 0;
-    const appendChunk = () => {
-      const end = Math.min(shown + 12, total);
-      const frag = document.createDocumentFragment();
-      for (; shown < end; shown++) frag.append(buildBoard(shown));
-      grid.append(frag);
-      status.textContent = shown < total
-        ? `${fmt(shown)} / ${fmt(total)} 件を表示中（下にスクロールすると続きを表示します）`
-        : `全 ${fmt(total)} 件を表示しました`;
-    };
-
-    const body = h('div', {},
-      h('div', { class: 'row' }, verdict, h('span', {}, `該当する結果 ${fmt(total)} 通り`)),
-      legend, grid, status);
-    openDialog(`${names[focus]} が ${targetLabel(snap.target)} に入る結果`, body, [{ label: '閉じる', cls: 'primary' }], { wide: true });
-
-    const scroller = body.parentElement;
-    const pump = () => {
-      if (!grid.isConnected || shown >= total) return;
-      if (status.getBoundingClientRect().top < scroller.getBoundingClientRect().bottom + 800) {
-        appendChunk();
-        requestAnimationFrame(pump);
-      }
-    };
-    scroller.addEventListener('scroll', pump, { passive: true });
-    appendChunk();
-    requestAnimationFrame(pump);
   }
 
   // ─────────────────────────────────────────────
@@ -1287,6 +1167,15 @@ SANADA < 大岩
     }
   }
 
+  async function loadText(path) {
+    let res;
+    try { res = await fetch(path); } catch (_) { res = null; }
+    if (!res || !res.ok) throw new Error(`${path} を読み込めませんでした。ローカルサーバー(またはGitHub Pages)経由で開いてください`);
+    return res.text();
+  }
+
+  const safeScript = text => text.replace(/<\/script/gi, '<\\/script');
+
   const escHtml = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
   function serialize(nodes) {
@@ -1295,8 +1184,60 @@ SANADA < 大岩
     return box.innerHTML;
   }
 
+  // 書き出したページに埋め込むデータ(「全通りの星取表」をページ内で再現するのに必要な分だけ)
+  function staticData(snap, details) {
+    const { problem } = snap;
+    const data = {
+      snap: {
+        names: snap.names, n: snap.n, target: snap.target, outcomes: snap.outcomes, league: snap.league,
+        problem: {
+          n: problem.n, pending: problem.pending, options: problem.options,
+          basePts: Array.from(problem.basePts), h2h: Array.from(problem.h2h),
+        },
+      },
+      details: Object.fromEntries(details),
+    };
+    return JSON.stringify(data).replace(/</g, '\\u003c');
+  }
+
+  // 書き出したページで動く小さなスクリプト。「パターン数」を押すと、該当する全通りの星取表をダイアログで表示する
+  const STATIC_BOOT = `(function () {
+  var data = JSON.parse(document.getElementById('league-data').textContent);
+  var snap = data.snap, dlg = document.getElementById('dlg');
+  function el(tag, cls, text) {
+    var e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text) e.textContent = text;
+    return e;
+  }
+  dlg.addEventListener('click', function (e) { if (e.target === dlg) dlg.close(); });
+  function open(title, body) {
+    var foot = el('div', 'dlg-foot'), close = el('button', 'btn primary', '閉じる');
+    close.addEventListener('click', function () { dlg.close(); });
+    foot.append(close);
+    var content = el('div', 'dlg-body');
+    content.append(body);
+    dlg.className = 'wide';
+    dlg.replaceChildren(el('div', 'dlg-head', title), content, foot);
+    if (!dlg.open) dlg.showModal();
+  }
+  function rowsOf(d) {
+    var all = [];
+    d.certain.rows.forEach(function (row) { all.push({ kind: 'certain', row: row }); });
+    d.playoffs.forEach(function (g) { g.rows.forEach(function (row) { all.push({ kind: 'playoff', row: row, mask: g.mask }); }); });
+    return all;
+  }
+  document.addEventListener('click', function (e) {
+    var b = e.target.closest ? e.target.closest('button[data-r]') : null;
+    if (!b) return;
+    var d = data.details[b.getAttribute('data-p')];
+    var x = rowsOf(d)[Number(b.getAttribute('data-r'))];
+    if (d && x) LeagueBoards.show(snap, d, x, open);
+  });
+})();`;
+
   /** 計算結果から、完結した1枚のHTML文字列を作る */
-  function buildStaticHtml({ name, league, snap, result, details, css, createdAt }) {
+  function buildStaticHtml({ name, league, snap, result, details, css, scripts, createdAt }) {
     const { target, names, problem } = snap;
     const label = targetLabel(target);
     const stamp = createdAt.toLocaleString('ja-JP', { dateStyle: 'medium', timeStyle: 'short' });
@@ -1351,7 +1292,18 @@ ${serialize(board)}
 <h2 class="sec" id="sim">シミュレーション</h2>
 ${serialize(cards)}
 </main>
+<dialog id="dlg"></dialog>
 <footer class="foot">リーグ戦シミュレーターで ${escHtml(stamp)} に書き出した静的なページです(閲覧のみ)。</footer>
+<script>
+${scripts.engine}
+</script>
+<script>
+${scripts.boards}
+</script>
+<script id="league-data" type="application/json">${staticData(snap, details)}</script>
+<script>
+${STATIC_BOOT}
+</script>
 </body>
 </html>
 `;
@@ -1425,7 +1377,8 @@ ${serialize(cards)}
 
         setProgress(1, 1, 'HTMLを作っています…');
         const css = await loadCss();
-        const html = buildStaticHtml({ name: lg.name, league, snap, result, details, css, createdAt });
+        const scripts = { engine: safeScript(await loadText('js/engine.js')), boards: safeScript(await loadText('js/boards.js')) };
+        const html = buildStaticHtml({ name: lg.name, league, snap, result, details, css, scripts, createdAt });
         const day = createdAt.toISOString().slice(0, 10);
         download(`${safeName(lg.name)}_${targetLabel(target)}_${day}.html`, html, 'text/html');
         status.textContent = `保存しました（${Math.round(html.length / 1024).toLocaleString('ja-JP')} KB）。ファイルを開くだけで表示できます。`;
