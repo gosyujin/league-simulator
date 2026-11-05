@@ -543,6 +543,22 @@ SANADA < 大岩
       save(); render();
     };
 
+    // 結果の種類を初期設定に戻す。同じ id で種類も同じ結果の入力済み試合は残し、それ以外は未実施に戻す
+    const resetOutcomes = async () => {
+      const defs = M.defaultOutcomes();
+      const lost = lg.outcomes.filter(o => {
+        const d = defs.find(x => x.id === o.id);
+        return !d || d.kind !== o.kind;
+      });
+      const affected = lost.reduce((n, o) => n + usageCount(lg, o.id), 0);
+      const msg = '結果の種類と勝ち点を初期設定(勝ち・引き分け・無効試合・不戦勝)に戻します。'
+        + (affected ? `初期設定に無い結果が入力済みの${affected}試合は未実施に戻ります。` : '');
+      if (!await confirmDialog(msg, '初期設定にする', affected > 0)) return;
+      for (const o of lost) dropResultsOf(lg, o.id);
+      lg.outcomes = defs;
+      save(); render();
+    };
+
     return h('section', { class: 'card' },
       h('div', { class: 'card-head' },
         h('h2', {}, '試合結果の種類と勝ち点'),
@@ -556,7 +572,9 @@ SANADA < 大岩
         '「勝敗が決まる」は勝者と敗者に別々の点が入る結果です（例: 勝ち 2点/0点、反則勝ち 2点/0点）。',
         '「双方同じ点」は両者に同じ点が入る結果です（例: 引き分け 1点、無効試合 1点）。',
         '「予測に含める」にチェックした結果だけが、未実施試合で起こり得る結果として全パターンの列挙に使われます。'),
-      h('button', { class: 'btn', onclick: addOutcome }, '＋ 結果の種類を追加'));
+      h('div', { style: 'display:flex;gap:8px;flex-wrap:wrap' },
+        h('button', { class: 'btn', onclick: addOutcome }, '＋ 結果の種類を追加'),
+        h('button', { class: 'btn', onclick: resetOutcomes }, 'デフォルトに設定')));
   }
 
   // ─────────────────────────────────────────────
