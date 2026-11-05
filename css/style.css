@@ -278,3 +278,17 @@ details ul { margin: 4px 0 0; padding-left: 1.4em; }
 @media (pointer: coarse) {
   input, select, textarea { font-size: 16px; }
 }
+
+/* ── 静的HTML(書き出したページ) ── */
+html { scroll-behavior: smooth; }
+body.static [id] { scroll-margin-top: 96px; }
+body.static h2.sec { font-size: 1.3rem; margin: 12px 0 0; padding-bottom: 4px; border-bottom: 2px solid var(--line); }
+body.static .appbar-row { padding-bottom: 2px; }
+a.tab { text-decoration: none; display: inline-block; }
+a.tab:hover { color: var(--accent); }
+.card a:not(.btn) { color: var(--accent); }
+.card-head .back { margin-left: auto; font-size: .85rem; }
+.foot { max-width: 1120px; margin: 0 auto; padding: 8px 16px 32px; color: var(--muted); font-size: .85rem; }
+@media (max-width: 600px) {
+  body.static [id] { scroll-margin-top: 170px; }
+}

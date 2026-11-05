@@ -328,6 +328,7 @@ SANADA < 大岩
         h('button', { class: 'btn small', onclick: createLeague }, '＋ 新規リーグ'),
         h('span', { class: 'spacer' }),
         h('button', { class: 'btn icon', onclick: gistDialog, 'aria-label': 'Gistの設定', title: 'Gistの設定(保存 / 共有)' }, '⚙'),
+        h('button', { class: 'btn', onclick: staticDialog, title: '結果を1枚の静的HTMLとして保存(GitHub Pagesなどに置けます)' }, 'HTMLで保存'),
         h('button', { class: 'btn', onclick: ioDialog }, 'インポート / エクスポート')),
       h('nav', { class: 'tabs', role: 'tablist' }, tabs.map(([id, label]) => h('button', {
         class: 'tab', role: 'tab', 'aria-selected': String(state.tab === id), onclick: () => setTab(id),
@@ -588,7 +589,8 @@ SANADA < 大岩
     return cellFromResult(lg.outcomes, lg.results[pairKey(ps[r].id, ps[c].id)], ps[r].id);
   }
 
-  function cardStarTable(lg) {
+  // lg は { participants, outcomes, results } があればよい。readonly=true なら編集用のボタンを出さない(静的HTML用)
+  function cardStarTable(lg, readonly) {
     const ps = lg.participants;
     const total = ps.length * (ps.length - 1) / 2;
     const done = Object.keys(lg.results).length;
@@ -603,6 +605,7 @@ SANADA < 大岩
       ps.map((cp, c) => {
         if (r === c) return h('td', { class: 'self' });
         const info = cellInfo(lg, r, c);
+        if (readonly) return h('td', { class: info.cls, title: `${rp.name} vs ${cp.name}: ${info.label}` }, info.text);
         return h('td', { class: info.cls },
           h('button', {
             class: 'cell-btn', 'aria-label': `${rp.name} vs ${cp.name}: ${info.label}`,
@@ -618,7 +621,7 @@ SANADA < 大岩
     return h('section', { class: 'card' },
       h('div', { class: 'card-head' },
         h('h2', {}, '星取表'),
-        h('span', { class: 'hint' }, `消化 ${done} / ${total} 試合（残り ${total - done} 試合）。マスをクリックして結果を入力`)),
+        h('span', { class: 'hint' }, `消化 ${done} / ${total} 試合（残り ${total - done} 試合）` + (readonly ? '' : '。マスをクリックして結果を入力'))),
       h('div', { class: 'table-wrap' }, h('table', { class: 'star' }, h('thead', {}, head), h('tbody', {}, body))),
       h('div', { class: 'legend' }, '行の選手から見た結果:', legend, h('span', {}, '空欄 = 未実施')));
   }
@@ -718,12 +721,23 @@ SANADA < 大岩
   // ─────────────────────────────────────────────
 
   function targetRange(lg) {
-    const n = Math.min(lg.target.n, lg.participants.length);
-    return lg.target.mode === 'exact' ? { lo: n, hi: n } : { lo: 1, hi: n };
+    return rangeOf(lg.target, lg.participants.length);
+  }
+
+  function rangeOf(target, count) {
+    const n = Math.min(target.n, count);
+    return target.mode === 'exact' ? { lo: n, hi: n } : { lo: 1, hi: n };
   }
 
   function targetLabel(t) {
     return t.mode === 'exact' ? `ちょうど${t.n}位` : `${t.n}位以内`;
+  }
+
+  // 「どんな条件を調べるか」の説明文
+  function targetNote(t) {
+    return t.mode === 'exact'
+      ? `ちょうど${t.n}位になる条件を調べます`
+      : `${t.n === 1 ? '1位' : `1〜${t.n}位`}に入る(${t.n}位抜けできる)条件を調べます`;
   }
 
   function leagueKey(lg) {
@@ -746,7 +760,7 @@ SANADA < 大岩
     const tooMany = total > EXHAUSTIVE_LIMIT;
 
     const setTarget = patch => { Object.assign(lg.target, patch); save(); render(); };
-    const optionText = lg.outcomes.filter(o => o.simulate).map(o => (o.kind === 'shared' ? o.name : `${o.name}(どちらが勝つか)`)).join('・');
+    const optionText = optionTextOf(lg.outcomes);
 
     const targetRow = h('div', { class: 'controls' },
       h('label', {}, '狙う順位',
@@ -754,9 +768,7 @@ SANADA < 大岩
           h('option', { value: 'within' }, '以内（勝ち抜け）'), h('option', { value: 'exact' }, 'ちょうど'))),
       h('select', { 'aria-label': '順位', value: String(lg.target.n), onchange: e => setTarget({ n: parseInt(e.target.value, 10) }) },
         Array.from({ length: n }, (_, i) => h('option', { value: String(i + 1) }, `${i + 1}位`))),
-      h('span', { class: 'muted' }, lg.target.mode === 'exact'
-        ? `ちょうど${lg.target.n}位になる条件を調べます`
-        : `${lg.target.n === 1 ? '1位' : `1〜${lg.target.n}位`}に入る(${lg.target.n}位抜けできる)条件を調べます`));
+      h('span', { class: 'muted' }, targetNote(lg.target)));
 
     const facts = h('div', { class: 'facts' },
       fact(String(k), '未実施の試合'),
@@ -804,6 +816,9 @@ SANADA < 大岩
     if (sim.result) cards.push(...resultCards(lg));
     return cards;
   }
+
+  const optionTextOf = outcomes => outcomes.filter(o => o.simulate)
+    .map(o => (o.kind === 'shared' ? o.name : `${o.name}(どちらが勝つか)`)).join('・');
 
   const fact = (value, label) => h('div', { class: 'fact' }, h('b', {}, value), h('span', {}, label));
 
@@ -892,14 +907,19 @@ SANADA < 大岩
     return cards;
   }
 
+  // 「入れる可能性」の並び順(確定+決定戦の多い順)
+  function chanceRows(names, result) {
+    return names.map((name, p) => ({ p, name, c: result.certain[p], po: result.playoff[p] }))
+      .sort((a, b) => (b.c + b.po) - (a.c + a.po) || b.c - a.c || a.p - b.p);
+  }
+
   function cardChances(snap, result, sim) {
     const { names, n } = snap;
     const done = result.processed;
-    const rows = names.map((name, p) => ({ p, name, c: result.certain[p], po: result.playoff[p] }))
-      .sort((a, b) => (b.c + b.po) - (a.c + a.po) || b.c - a.c || a.p - b.p);
+    const rows = chanceRows(names, result);
     const sample = result.mode === 'sample';
 
-    return h('section', { class: 'card' },
+    return h('section', { class: 'card', id: 'chances' },
       h('div', { class: 'card-head' },
         h('h2', {}, `${targetLabel(snap.target)}に入れる可能性`),
         h('span', { class: 'hint' }, sample
@@ -923,10 +943,12 @@ SANADA < 大岩
             h('td', { class: 'num' }, fmt(any)),
             h('td', { class: 'num' }, h('b', {}, pct(any, done))),
             h('td', {}, !sample && any > 0 && n > 0
-              ? h('button', {
-                class: 'btn small', 'aria-pressed': String(sim.detailFor === r.p),
-                onclick: () => loadDetail(r.p),
-              }, '条件を見る') : null));
+              ? (sim.static
+                ? h('a', { class: 'btn small', href: '#' + condId(r.p) }, '条件を見る')   // 静的HTML: ページ内リンクで飛ばす
+                : h('button', {
+                  class: 'btn small', 'aria-pressed': String(sim.detailFor === r.p),
+                  onclick: () => loadDetail(r.p),
+                }, '条件を見る')) : null));
         })))),
       sample ? h('p', { class: 'muted', style: 'margin:8px 0 0' }, '概算のため件数は目安です。残り試合が減ると全パターンの計算と条件の一覧が使えます。') : null);
   }
@@ -982,14 +1004,18 @@ SANADA < 大岩
     return h('span', { class: w === focus ? 'me' : '' }, `${snap.names[w]} ${o.mark}`);
   }
 
+  const condId = p => `cond-${p}`;
+
   function cardDetail(snap, result, sim) {
     const focus = sim.detailFor;
     const name = snap.names[focus];
     const title = `${name} が ${targetLabel(snap.target)} に入る条件`;
-    const head = h('div', { class: 'card-head' }, h('h2', {}, title));
+    const head = h('div', { class: 'card-head' }, h('h2', {}, title),
+      sim.static ? h('a', { class: 'back', href: '#chances' }, '↑ 可能性の一覧へ戻る') : null);
+    const cardAttrs = cls => ({ class: cls, id: sim.static ? condId(focus) : null });
 
     if (sim.detailLoading || !sim.detail) {
-      return h('section', { class: 'card' }, head, h('p', { class: 'muted' }, '集計中…'));
+      return h('section', cardAttrs('card'), head, h('p', { class: 'muted' }, '集計中…'));
     }
     const d = sim.detail;
     const all = [];
@@ -1007,7 +1033,7 @@ SANADA < 大岩
       h('b', {}, `確定 ${fmt(d.certain.count)} 通り`),
       playoffTotal ? [' + ', h('b', {}, `決定戦 ${fmt(playoffTotal)} 通り`)] : null, '。',
       ' 表の1行は、その行の条件を満たす結果パターンをまとめたものです。「—」はどの結果でもよいことを表します。',
-      ' パターン数をクリックすると、該当する結果を星取表ですべて表示します。');
+      sim.static ? null : ' パターン数をクリックすると、該当する結果を星取表ですべて表示します。');
 
     const notes = [];
     if (d.overflow) notes.push(h('div', { class: 'notice' }, '該当するパターンが多すぎるため、途中で集計を打ち切っています。下の表は一部です。'));
@@ -1016,12 +1042,12 @@ SANADA < 大岩
     }
 
     if (!all.length) {
-      return h('section', { class: 'card' }, head, summary, h('p', { class: 'muted' }, '該当するパターンはありません。'));
+      return h('section', cardAttrs('card'), head, summary, h('p', { class: 'muted' }, '該当するパターンはありません。'));
     }
     if (!cols.length && all.length === 1) {
       const only = all[0];
       const what = only.kind === 'certain' ? '残りの試合がどんな結果でも確定します' : '残りの試合がどんな結果でも決定戦になります';
-      return h('section', { class: 'card' }, head, summary, notes, h('p', {}, what + '。'));
+      return h('section', cardAttrs('card'), head, summary, notes, h('p', {}, what + '。'));
     }
 
     const shown = all.slice(0, sim.detailLimit);
@@ -1044,12 +1070,12 @@ SANADA < 大岩
       h('td', {}, x.kind === 'certain'
         ? h('span', { class: 'chip ok' }, '確定')
         : h('span', { class: 'chip warn' }, `決定戦 vs ${namesOf(snap.names, x.mask, focus).join('・')}`)),
-      h('td', { class: 'num' }, h('button', {
+      h('td', { class: 'num' }, sim.static ? fmt(x.row.count) : h('button', {
         class: 'linkish', title: 'この条件に当てはまる結果を、星取表ですべて見る',
         onclick: () => showBoards(snap, d, x),
       }, fmt(x.row.count)))));
 
-    return h('section', { class: 'card pat' }, head, summary, notes,
+    return h('section', cardAttrs('card pat'), head, summary, notes,
       h('div', { class: 'table-wrap' }, h('table', {}, h('thead', {}, thead), h('tbody', {}, tbody))),
       all.length > shown.length
         ? h('div', { style: 'margin-top:10px' },
@@ -1170,8 +1196,8 @@ SANADA < 大岩
   // インポート / エクスポート
   // ─────────────────────────────────────────────
 
-  function download(filename, text) {
-    const url = URL.createObjectURL(new Blob([text], { type: 'application/json' }));
+  function download(filename, text, mime) {
+    const url = URL.createObjectURL(new Blob([text], { type: mime || 'application/json' }));
     const a = h('a', { href: url, download: filename });
     document.body.append(a);
     a.click();
@@ -1239,6 +1265,196 @@ SANADA < 大岩
       { label: '閉じる' },
       { label: '読み込む', cls: 'primary', onClick: doImport },
     ]);
+  }
+
+  // ─────────────────────────────────────────────
+  // 静的HTMLとして保存
+  // ─────────────────────────────────────────────
+  // その時点の星取表と、指定した順位条件のシミュレーション結果を、CSSも含めた1枚のHTMLにする。
+  // JavaScript は含めない(見るだけ。ページ内リンクだけで移動できる)。
+
+  const STATIC_MAX_ROWS = 3000;   // 1人あたりの「条件」の行数の上限(HTMLが大きくなりすぎないように)
+
+  async function loadCss() {
+    try {
+      const res = await fetch('css/style.css');
+      if (res.ok) return await res.text();
+    } catch (_) { /* file:// など。次の方法で取る */ }
+    try {
+      return [...document.styleSheets].flatMap(ss => [...ss.cssRules].map(r => r.cssText)).join('\n');
+    } catch (_) {
+      throw new Error('CSSを読み込めませんでした。ローカルサーバー(またはGitHub Pages)経由で開いてください');
+    }
+  }
+
+  const escHtml = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+  function serialize(nodes) {
+    const box = document.createElement('div');
+    appendKids(box, [nodes]);
+    return box.innerHTML;
+  }
+
+  /** 計算結果から、完結した1枚のHTML文字列を作る */
+  function buildStaticHtml({ name, league, snap, result, details, css, createdAt }) {
+    const { target, names, problem } = snap;
+    const label = targetLabel(target);
+    const stamp = createdAt.toLocaleString('ja-JP', { dateStyle: 'medium', timeStyle: 'short' });
+    const k = problem.pending.length;
+    const total = E.countPatterns(problem);
+
+    const board = cardStarTable(league, true);
+
+    const cond = h('section', { class: 'card' },
+      h('div', { class: 'card-head' }, h('h2', {}, '条件'),
+        h('span', { class: 'hint' }, `未実施試合で数え上げる結果: ${optionTextOf(snap.outcomes) || 'なし'}`)),
+      h('p', {}, h('b', {}, `狙う順位: ${label}`), h('span', { class: 'muted' }, ` — ${targetNote(target)}`)),
+      h('div', { class: 'facts' },
+        fact(String(k), '未実施の試合'),
+        fact(String(problem.options.length), '1試合あたりの結果'),
+        fact(k === 0 ? '1' : fmtBig(total), '全結果パターン')),
+      rulesNote());
+
+    const cards = [cond, cardChances(snap, result, { static: true, detailFor: null })];
+    for (const row of chanceRows(names, result)) {
+      if (!details.has(row.p)) continue;
+      cards.push(cardDetail(snap, result, {
+        static: true, detailFor: row.p, detail: details.get(row.p), detailLimit: Infinity, detailLoading: false,
+      }));
+    }
+    if (result.ties.length) cards.push(Object.assign(cardTies(snap, result), { id: 'ties' }));
+
+    const title = `${name} ${label} シミュレーション結果`;
+    return `<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${escHtml(title)}</title>
+<meta name="description" content="${escHtml(`${stamp} 時点の星取表と、${label}に入る条件のシミュレーション結果`)}">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%8F%86%3C/text%3E%3C/svg%3E">
+<style>
+${css.replace(/<\/style/gi, '<\\/style')}
+</style>
+</head>
+<body class="static">
+<header class="appbar">
+  <div class="appbar-row">
+    <span class="brand">🏆 ${escHtml(name)}</span>
+    <span class="muted">${escHtml(label)} ／ ${escHtml(stamp)} 時点のスナップショット</span>
+  </div>
+  <nav class="tabs"><a class="tab" href="#board">星取表</a><a class="tab" href="#sim">シミュレーション</a>${result.ties.length ? '<a class="tab" href="#ties">決定戦</a>' : ''}</nav>
+</header>
+<main>
+<h2 class="sec" id="board">星取表</h2>
+${serialize(board)}
+<h2 class="sec" id="sim">シミュレーション</h2>
+${serialize(cards)}
+</main>
+<footer class="foot">リーグ戦シミュレーターで ${escHtml(stamp)} に書き出した静的なページです(閲覧のみ)。</footer>
+</body>
+</html>
+`;
+  }
+
+  function staticDialog() {
+    const lg = cur();
+    const n = lg.participants.length;
+    if (n < 2) { toast('参加者を2名以上登録すると保存できます'); return; }
+
+    const problem = E.compile(lg);
+    const total = E.countPatterns(problem);
+    const k = problem.pending.length;
+    const noOptions = k > 0 && problem.options.length === 0;
+    const tooMany = total > EXHAUSTIVE_LIMIT;
+    const target = { mode: lg.target.mode, n: Math.min(Math.max(lg.target.n, 1), n) };
+
+    const note = h('span', { class: 'muted' }, targetNote(target));
+    const modeSel = h('select', {
+      'aria-label': '順位の条件', value: target.mode,
+      onchange: e => { target.mode = e.target.value; note.textContent = targetNote(target); },
+    }, h('option', { value: 'within' }, '以内（勝ち抜け）'), h('option', { value: 'exact' }, 'ちょうど'));
+    const nSel = h('select', {
+      'aria-label': '順位', value: String(target.n),
+      onchange: e => { target.n = parseInt(e.target.value, 10); note.textContent = targetNote(target); },
+    }, Array.from({ length: n }, (_, i) => h('option', { value: String(i + 1) }, `${i + 1}位`)));
+
+    const bar = h('progress', { max: 1, value: 0, hidden: true });
+    const status = h('p', { class: 'muted', style: 'margin:8px 0 0' });
+    let job = null, running = false, cancelled = false;
+
+    const blocker = noOptions
+      ? '「設定」タブで、未実施試合で起こり得る結果に「予測に含める」のチェックを1つ以上入れてください。'
+      : tooMany
+        ? `パターン数が ${fmtBig(total)} 通りと多すぎるため、全網羅できません。条件の一覧を含むHTMLは、残り試合が減ってから保存してください。`
+        : null;
+
+    const setProgress = (done, all, text) => {
+      bar.hidden = false; bar.max = all; bar.value = done;
+      status.textContent = text;
+    };
+
+    async function run() {
+      if (running) return true;
+      if (blocker) { toast(blocker); return true; }
+      running = true; cancelled = false;
+      status.className = 'muted';
+      // 計算中に入力が変わっても、押した時点の内容で作る
+      const league = JSON.parse(JSON.stringify({ participants: lg.participants, outcomes: lg.outcomes, results: lg.results }));
+      const prob = E.compile(league);
+      const { lo, hi } = rangeOf(target, prob.n);
+      const snap = {
+        problem: prob, n: prob.n, names: prob.names, lo, hi, target: Object.assign({}, target),
+        outcomes: league.outcomes, league,
+      };
+      const createdAt = new Date();
+      try {
+        setProgress(0, 1, '全パターンを計算しています…');
+        job = startJob({ type: 'run', problem: prob, opts: { mode: 'exhaustive', lo, hi } },
+          p => setProgress(p.done, p.total, `全パターンを計算しています… ${fmt(p.done)} / ${fmt(p.total)}`));
+        const result = await job.promise;
+
+        const targets = chanceRows(prob.names, result).filter(r => r.c + r.po > 0);
+        const details = new Map();
+        for (let i = 0; i < targets.length; i++) {
+          setProgress(i, targets.length, `条件を集計しています… ${i + 1} / ${targets.length}人目（${targets[i].name}）`);
+          job = startJob({ type: 'detail', problem: prob, opts: { focus: targets[i].p, lo, hi, maxRows: STATIC_MAX_ROWS } });
+          details.set(targets[i].p, await job.promise);
+        }
+        job = null;
+
+        setProgress(1, 1, 'HTMLを作っています…');
+        const css = await loadCss();
+        const html = buildStaticHtml({ name: lg.name, league, snap, result, details, css, createdAt });
+        const day = createdAt.toISOString().slice(0, 10);
+        download(`${safeName(lg.name)}_${targetLabel(target)}_${day}.html`, html, 'text/html');
+        status.textContent = `保存しました（${Math.round(html.length / 1024).toLocaleString('ja-JP')} KB）。ファイルを開くだけで表示できます。`;
+        bar.hidden = true;
+        toast('HTMLを保存しました');
+      } catch (e) {
+        bar.hidden = true;
+        if (!cancelled) { status.className = 'notice error'; status.textContent = '保存できませんでした: ' + e.message; }
+      }
+      running = false; job = null;
+      return true;
+    }
+
+    openDialog('結果を静的HTMLとして保存', [
+      h('p', { class: 'muted', style: 'margin-top:0' },
+        'いまの星取表と、下で決めた順位条件のシミュレーション結果(入れる可能性・各選手の条件・決定戦になる組み合わせ)を、CSSも含めた1枚のHTMLにします。',
+        'GitHub Pagesなどに置くだけで公開でき、閲覧のみ(編集や再計算はできません)です。'),
+      h('h3', {}, '狙う順位（保存する条件）'),
+      h('div', { class: 'controls' }, h('label', {}, '狙う順位', modeSel), nSel, note),
+      h('p', { class: 'muted', style: 'margin:0' }, `未実施 ${k} 試合 / 全結果パターン ${k === 0 ? '1' : fmtBig(total)} 通り`),
+      blocker ? h('div', { class: 'notice error', style: 'margin-top:8px' }, blocker) : null,
+      h('div', { style: 'margin-top:8px' }, bar), status,
+    ], [
+      { label: '閉じる' },
+      { label: 'HTMLを保存', cls: 'primary', onClick: run },
+    ]);
+    dlg.addEventListener('close', () => {
+      if (job) { cancelled = true; job.cancel(); job = null; }
+    }, { once: true });
   }
 
   // ─────────────────────────────────────────────
