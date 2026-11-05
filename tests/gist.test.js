@@ -133,6 +133,28 @@ test('書き込みにはトークンが必要で、指定したファイルだ�
   }
 });
 
+test('未アップの目印: 最後にGistと同じだった内容と違うリーグだけが挙がる', () => {
+  const store = {};
+  global.localStorage = { getItem: k => (k in store ? store[k] : null), setItem: (k, v) => { store[k] = String(v); } };
+  try {
+    const entries = [['l1', '内容A'], ['l2', '内容B']];
+    assert.deepStrictEqual(G.unsyncedIds(entries), [], 'Gist ID が未設定なら何も挙げない');
+    G.setConfig({ gistId: 'a'.repeat(32) });
+    assert.deepStrictEqual(G.unsyncedIds(entries), ['l1', 'l2'], '記録がないリーグは未アップ');
+    G.markSynced('l1', '内容A');
+    assert.deepStrictEqual(G.unsyncedIds(entries), ['l2']);
+    assert.deepStrictEqual(G.unsyncedIds([['l1', '内容A(編集後)'], ['l2', '内容B']]), ['l1', 'l2'], '内容が変わると未アップに戻る');
+    G.setConfig({ gistId: 'b'.repeat(32) });
+    assert.deepStrictEqual(G.unsyncedIds(entries), ['l1', 'l2'], '別のGistに切り替えると、突き合わせるまで未アップ');
+    G.markSynced('l2', '内容B', 'a'.repeat(32));
+    assert.deepStrictEqual(G.unsyncedIds(entries), ['l1', 'l2'], 'Gist ID を指定して記録すると、そのGistの分になる');
+    store['league-simulator:gistSynced'] = '壊れたJSON';
+    assert.deepStrictEqual(G.unsyncedIds(entries), ['l1', 'l2'], '記録が壊れていても落ちず、未アップ扱い');
+  } finally {
+    delete global.localStorage;
+  }
+});
+
 test('Gist を作成するとシークレットで、リーグごとにファイルができる', async () => {
   const gh = fakeGitHub({});
   G.setFetch(gh.impl);
@@ -174,6 +196,14 @@ test('差分: 同じ / 端末のみ / Gistのみ / 内容が違う / 読めな�
   assert.ok(byId.bad.error);
   // 並びは「この端末のリーグ → Gistのみ」
   assert.deepStrictEqual(plan.map(r => r.id), ['s', 'lo', 'd', 'ro', 'bad']);
+});
+
+test('内容の比較はキーの順番に左右されない(新規作成直後と読み込み直しで同じ)', () => {
+  const lg = M.newLeague('x');
+  const reread = M.parseImport(G.leagueFileText(M, lg), '', { keepId: true })[0];
+  assert.strictEqual(G.signature(M, lg), G.signature(M, reread));
+  reread.name = 'y';
+  assert.notStrictEqual(G.signature(M, lg), G.signature(M, reread), '内容が変われば違う');
 });
 
 test('更新日時だけが違う場合は同じ内容として扱う', () => {

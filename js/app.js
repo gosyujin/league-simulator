@@ -225,10 +225,40 @@ SANADA < 大岩
     }
   }
 
+  // Gistに未アップの変更があるリーグ(Gist ID を設定していないときは空)
+  function gistDirtyIds() {
+    return G.unsyncedIds(state.leagues.map(l => [l.id, leagueSigs.get(l.id) ?? G.signature(M, l)]));
+  }
+
+  // 歯車ボタンの目印。未アップのリーグがあれば赤い点を出す
+  function updateGistMark() {
+    const btn = document.getElementById('gist-btn');
+    if (!btn) return;
+    const n = gistDirtyIds().length;
+    const label = n ? `Gistの設定(保存 / 共有)。Gistに未アップの変更があるリーグが${n}件あります` : 'Gistの設定(保存 / 共有)';
+    btn.classList.toggle('dirty', n > 0);
+    btn.title = label;
+    btn.setAttribute('aria-label', label);
+  }
+
+  // 同期した(Gistと同じ内容になった)リーグを記録して、目印を更新する
+  function markSynced(lg, gistId) {
+    G.markSynced(lg.id, G.signature(M, lg), gistId);
+    updateGistMark();
+  }
+
+  // 未アップのリーグがあるままページを閉じようとしたら、ブラウザの確認を出す
+  window.addEventListener('beforeunload', e => {
+    if (!gistDirtyIds().length) return;
+    e.preventDefault();
+    e.returnValue = '';
+  });
+
   let saveWarned = false;
   function save() {
     try {
       touchLeagues();
+      updateGistMark();
       const obj = M.exportFile(state.leagues, { withId: true });
       obj.current = state.leagues.findIndex(l => l.id === state.currentId);
       localStorage.setItem(STORAGE_KEY, JSON.stringify(obj));
@@ -327,13 +357,14 @@ SANADA < 大岩
           state.leagues.map(l => h('option', { value: l.id, selected: l.id === lg.id }, l.name))),
         h('button', { class: 'btn small', onclick: createLeague }, '＋ 新規リーグ'),
         h('span', { class: 'spacer' }),
-        h('button', { class: 'btn icon', onclick: gistDialog, 'aria-label': 'Gistの設定', title: 'Gistの設定(保存 / 共有)' }, '⚙'),
         h('button', { class: 'btn', onclick: staticDialog, title: '結果を1枚の静的HTMLとして保存(GitHub Pagesなどに置けます)' }, 'HTMLで保存'),
-        h('button', { class: 'btn', onclick: ioDialog }, 'インポート / エクスポート')),
+        h('button', { class: 'btn', onclick: ioDialog }, 'インポート / エクスポート'),
+        h('button', { id: 'gist-btn', class: 'btn icon', onclick: gistDialog, 'aria-label': 'Gistの設定', title: 'Gistの設定(保存 / 共有)' }, '⚙')),
       h('nav', { class: 'tabs', role: 'tablist' }, tabs.map(([id, label]) => h('button', {
         class: 'tab', role: 'tab', 'aria-selected': String(state.tab === id), onclick: () => setTab(id),
       }, label))),
     );
+    updateGistMark();
   }
 
   async function createLeague() {
@@ -1441,7 +1472,9 @@ ${STATIC_BOOT}
     leagueSigs.delete(remote.id);   // Gist側の更新日時をそのまま保つ(touchLeagues 参照)
     if (i >= 0) state.leagues[i] = remote; else state.leagues.push(remote);
     if (state.currentId === remote.id) { cancelSim(); state.sim = freshSim(); }
-    save(); render();
+    save();
+    markSynced(remote);
+    render();
   }
 
   // 操作を実行し、結果を知らせて、最新の状態でGistのダイアログを開き直す
@@ -1503,6 +1536,8 @@ ${STATIC_BOOT}
         if (mine !== seq) return;
         snap = s;
         plan = G.buildPlan(M, state.leagues, s.files);
+        // Gistと同じ内容だったリーグは、アップ済みとして記録する
+        for (const r of plan) if (r.status === 'same') markSynced(r.local, gistId);
         renderPlan();
       } catch (e) {
         if (mine !== seq) return;
@@ -1597,6 +1632,7 @@ ${STATIC_BOOT}
       }
       await G.update(gistId, files);
       save();
+      for (const r of rows) if (r.local) markSynced(r.local, gistId);
       return `${Object.keys(files).length}件のリーグをGistに書き込みました`;
     }
 
@@ -1613,6 +1649,7 @@ ${STATIC_BOOT}
       G.setConfig({ gistId: id });
       idInput.value = id;
       save();
+      for (const lg of state.leagues.slice(0, G.MAX_FILES)) markSynced(lg, id);
       return 'シークレットGistを作成しました';
     }
 

@@ -7,6 +7,7 @@
  *   gist スコープが必要(fine-grained PAT は Gist 非対応)。トークンはこの端末の localStorage にだけ置く。
  * - 同期は自動では行わない。ローカルとGistの差(Gistにだけある/この端末にだけある/内容が違う)を
  *   一覧にして、リーグ単位で読み込み・書き込みを選ぶ(黙って上書きしない)。
+ * - 書き忘れに気づけるよう、最後にGistと同じだった内容を端末に記録し、違うリーグがあれば目印と警告を出す。
  * - 1つのGistのファイル数は、APIで取得できるのが300件まで(それ以上は一覧が切り詰められる)。
  *   各ファイルも本文は1MBまでしか返らない(リーグ1件は数KBなので問題にならない)。
  */
@@ -16,6 +17,7 @@
   const API = 'https://api.github.com/gists';
   const TOKEN_KEY = 'league-simulator:gistToken';
   const CONFIG_KEY = 'league-simulator:gist';
+  const SYNCED_KEY = 'league-simulator:gistSynced';
   const FILE_PREFIX = 'league-simulator-';
   const FILE_RE = /^league-simulator-([A-Za-z0-9_-]{1,40})\.json$/;
   const MAX_FILES = 300;
@@ -43,6 +45,51 @@
     }
   }
   const setConfig = cfg => writeStore(CONFIG_KEY, JSON.stringify({ gistId: cfg.gistId || '' }));
+
+  // ── 「最後にGistと同じだった内容」の記録(未アップの目印・ページを閉じるときの警告に使う) ──
+  // { <Gist ID>: { <リーグid>: 内容の指紋 } } をこの端末の localStorage に持つ。Gist ID ごとに分けるので、
+  // 別のGistに切り替えると、そのGistと突き合わせるまでは「未アップ」扱いになる。
+
+  // 内容(signature)をそのまま持つと大きいので、短い指紋にする(53ビットのハッシュ。警告が出ない取りこぼしは実用上ない)
+  function digest(str) {
+    let h1 = 0xdeadbeef, h2 = 0x41c6ce57;
+    for (let i = 0; i < str.length; i++) {
+      const c = str.charCodeAt(i);
+      h1 = Math.imul(h1 ^ c, 2654435761);
+      h2 = Math.imul(h2 ^ c, 1597334677);
+    }
+    h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+    h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+    return (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(36) + ':' + str.length;
+  }
+
+  function readSynced() {
+    try {
+      const o = JSON.parse(readStore(SYNCED_KEY) || '{}');
+      return o && typeof o === 'object' && !Array.isArray(o) ? o : {};
+    } catch (_) {
+      return {};
+    }
+  }
+
+  // このリーグの内容(signature)は、いまGistにあるものと同じ(または、いまGistへ書いた)と記録する
+  function markSynced(leagueId, sig, gistId) {
+    const gid = gistId || getConfig().gistId;
+    if (!gid) return;
+    const all = readSynced();
+    const mine = all[gid] && typeof all[gid] === 'object' ? all[gid] : {};
+    mine[leagueId] = digest(sig);
+    all[gid] = mine;
+    writeStore(SYNCED_KEY, JSON.stringify(all));
+  }
+
+  // entries: [[リーグid, 今の内容(signature)], …]。Gist ID が未設定なら、Gistを使っていないので空
+  function unsyncedIds(entries) {
+    const gid = getConfig().gistId;
+    if (!gid) return [];
+    const mine = readSynced()[gid] || {};
+    return entries.filter(([id, sig]) => mine[id] !== digest(sig)).map(([id]) => id);
+  }
 
   // Gist の URL(https://gist.github.com/user/<id> 等)を貼られても ID を取り出す
   function parseGistId(input) {
@@ -137,8 +184,18 @@
   // M: LeagueModel。ファイルの中身は「このアプリのエクスポート形式でリーグ1件」+ id と更新日時
   const leagueFileText = (M, lg) => JSON.stringify(M.exportFile([lg], { withId: true }), null, 2);
 
+  // キーの順番によらず同じ文字列になる JSON(新規作成直後のリーグと、読み込み直したリーグで順番が違っても同じ内容と見なすため)
+  function stableStringify(v) {
+    if (Array.isArray(v)) return '[' + v.map(stableStringify).join(',') + ']';
+    if (v && typeof v === 'object') {
+      return '{' + Object.keys(v).sort().filter(k => v[k] !== undefined)
+        .map(k => JSON.stringify(k) + ':' + stableStringify(v[k])).join(',') + '}';
+    }
+    return JSON.stringify(v);
+  }
+
   // 内容が同じかどうかの判定用(id と更新日時は含めない)
-  const signature = (M, lg) => JSON.stringify(M.serializeLeague(lg));
+  const signature = (M, lg) => stableStringify(M.serializeLeague(lg));
 
   /**
    * ローカルのリーグ一覧とGistのファイルを突き合わせる。
@@ -186,7 +243,7 @@
 
   const api = {
     MAX_FILES, TOKEN_ISSUE_URL, fileName, leagueIdOf, getToken, setToken, getConfig, setConfig,
-    parseGistId, pageUrl, describeHttpError, fetchLeagueFiles, update, create,
+    markSynced, unsyncedIds, parseGistId, pageUrl, describeHttpError, fetchLeagueFiles, update, create,
     leagueFileText, signature, buildPlan,
     setFetch: fn => { fetchOverride = fn; }, // テスト用
   };
