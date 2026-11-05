@@ -8,8 +8,8 @@
  *     "name": "Aブロック",
  *     "participants": ["竹下", "後藤", ...],
  *     "outcomes": [
- *       { "id":"win",  "name":"勝ち",   "kind":"decisive", "win":2, "lose":0, "mark":"勝", "loseMark":"負", "simulate":true },
- *       { "id":"draw", "name":"引き分け","kind":"shared",   "pts":1,            "mark":"分", "simulate":false }
+ *       { "id":"win",  "name":"勝ち",   "kind":"decisive", "win":2, "lose":0, "mark":"○", "loseMark":"●", "simulate":true },
+ *       { "id":"draw", "name":"引き分け","kind":"shared",   "pts":1,            "mark":"△", "simulate":false }
  *     ],
  *     "matches": [ { "a":"竹下", "b":"後藤", "outcome":"win", "winner":"竹下" }, ... ],
  *     "target": { "mode":"within", "n":2 }
@@ -31,9 +31,10 @@
 
   function defaultOutcomes() {
     return [
-      { id: 'win', name: '勝ち', kind: 'decisive', win: 2, lose: 0, mark: '勝', loseMark: '負', simulate: true },
-      { id: 'draw', name: '引き分け', kind: 'shared', pts: 1, mark: '分', simulate: false },
-      { id: 'void', name: '無効試合', kind: 'shared', pts: 0, mark: '無', simulate: false },
+      { id: 'win', name: '勝ち', kind: 'decisive', win: 2, lose: 0, mark: '○', loseMark: '●', simulate: true },
+      { id: 'draw', name: '引き分け', kind: 'shared', pts: 1, mark: '△', simulate: false },
+      { id: 'void', name: '無効試合', kind: 'shared', pts: 1, mark: '─', simulate: false },
+      { id: 'forfeit', name: '不戦勝', kind: 'decisive', win: 2, lose: 0, mark: '◻', loseMark: '▪', simulate: false },
     ];
   }
 
@@ -161,13 +162,13 @@
   function legacyToRaw(name, names, scoring, simulate, pairs) {
     const outcomes = [{
       id: 'win', name: '勝ち', kind: 'decisive', win: scoring.win, lose: scoring.loss,
-      mark: '勝', loseMark: '負', simulate: true,
+      mark: '○', loseMark: '●', simulate: true,
     }];
     if (scoring.draw !== undefined) {
-      outcomes.push({ id: 'draw', name: '引き分け', kind: 'shared', pts: scoring.draw, mark: '分', simulate: simulate.draw === true });
+      outcomes.push({ id: 'draw', name: '引き分け', kind: 'shared', pts: scoring.draw, mark: '△', simulate: simulate.draw === true });
     }
     if (scoring.void !== undefined) {
-      outcomes.push({ id: 'void', name: '無効試合', kind: 'shared', pts: scoring.void, mark: '無', simulate: simulate.void === true });
+      outcomes.push({ id: 'void', name: '無効試合', kind: 'shared', pts: scoring.void, mark: '─', simulate: simulate.void === true });
     }
     const matches = pairs.map(({ a, b, status }) => {
       if (status === 'win') return { a, b, outcome: 'win', winner: a };

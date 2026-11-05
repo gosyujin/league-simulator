@@ -117,7 +117,7 @@
       ? h('span', { class: 'chip ok' }, '確定')
       : h('span', { class: 'chip warn' }, `決定戦 vs ${namesOf(names, x.mask, focus).join('・')}`);
     const legend = h('div', { class: 'legend', style: 'margin:8px 0 12px' },
-      h('span', {}, h('span', { class: 'sw sim' }, '勝'), '暖色のマス = 未実施だった試合のシミュレーション結果'),
+      h('span', {}, h('span', { class: 'sw sim' }, '○'), '暖色のマス = 未実施だった試合のシミュレーション結果'),
       outcomes.map(o => (o.kind === 'shared'
         ? h('span', {}, h('span', { class: 'sw cell-shared' }, o.mark), o.name)
         : h('span', {}, h('span', { class: 'sw cell-win' }, o.mark), h('span', { class: 'sw cell-lose' }, o.loseMark), o.name))));

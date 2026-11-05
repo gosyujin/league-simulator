@@ -16,7 +16,7 @@
 
   const SAMPLE_NAME = 'G1 Aブロック(サンプル)';
   const SAMPLE_TEXT = `participants: 竹下 後藤 ボルチン 辻 鷹木 ジェイク SANADA オーカーン アイス 大岩
-scoring: win=2 loss=0 draw=1 void=0
+scoring: win=2 loss=0 draw=1 void=1
 
 竹下 > 後藤
 竹下 > ボルチン
@@ -508,8 +508,8 @@ SANADA < 大岩
               if (!ok) { e.target.value = o.kind; return; }
               dropResultsOf(lg, o.id);
             }
-            if (to === 'shared') { o.kind = 'shared'; o.pts = 1; o.mark = '分'; delete o.win; delete o.lose; delete o.loseMark; }
-            else { o.kind = 'decisive'; o.win = 2; o.lose = 0; o.mark = '勝'; o.loseMark = '負'; delete o.pts; }
+            if (to === 'shared') { o.kind = 'shared'; o.pts = 1; o.mark = '△'; delete o.win; delete o.lose; delete o.loseMark; }
+            else { o.kind = 'decisive'; o.win = 2; o.lose = 0; o.mark = '○'; o.loseMark = '●'; delete o.pts; }
             save(); render();
           },
         }, h('option', { value: 'decisive' }, '勝敗が決まる'), h('option', { value: 'shared' }, '双方同じ点'))),
@@ -554,7 +554,7 @@ SANADA < 大岩
         h('tbody', {}, rows))),
       h('p', { class: 'muted', style: 'margin:10px 0' },
         '「勝敗が決まる」は勝者と敗者に別々の点が入る結果です（例: 勝ち 2点/0点、反則勝ち 2点/0点）。',
-        '「双方同じ点」は両者に同じ点が入る結果です（例: 引き分け 1点、無効試合 0点）。',
+        '「双方同じ点」は両者に同じ点が入る結果です（例: 引き分け 1点、無効試合 1点）。',
         '「予測に含める」にチェックした結果だけが、未実施試合で起こり得る結果として全パターンの列挙に使われます。'),
       h('button', { class: 'btn', onclick: addOutcome }, '＋ 結果の種類を追加'));
   }
@@ -1089,6 +1089,7 @@ SANADA < 大岩
 
   function loadSample() {
     const [lg] = M.parseImport(SAMPLE_TEXT, SAMPLE_NAME + '.txt');
+    lg.outcomes = M.defaultOutcomes(); // 結果の種類と勝ち点は、既定の設定に合わせる
     lg.target = { mode: 'within', n: 2 };
     state.leagues.push(lg);
     cancelSim();

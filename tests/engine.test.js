@@ -63,7 +63,7 @@ test('未実施の組み合わせ数は 結果数^試合数', () => {
   const lg = league(['A', 'B', 'C', 'D'], []);
   assert.strictEqual(E.countPatterns(problemOf(lg)), Math.pow(2, 6));
   const lg2 = M.deserializeLeague(Object.assign(M.serializeLeague(lg), {
-    outcomes: M.defaultOutcomes().map(o => Object.assign(o, { simulate: o.id !== 'void' })),
+    outcomes: M.defaultOutcomes().map(o => Object.assign(o, { simulate: (o.id === 'win' || o.id === 'draw') })),
   }));
   assert.strictEqual(E.countPatterns(problemOf(lg2)), Math.pow(3, 6));
 });
@@ -71,7 +71,7 @@ test('未実施の組み合わせ数は 結果数^試合数', () => {
 test('圧縮した条件の件数合計が元の件数と一致する', () => {
   const lg = league(['A', 'B', 'C', 'D', 'E'], [
     { a: 'A', b: 'B', outcome: 'win', winner: 'A' },
-  ], M.defaultOutcomes().map(o => Object.assign(o, { simulate: o.id !== 'void' })));
+  ], M.defaultOutcomes().map(o => Object.assign(o, { simulate: (o.id === 'win' || o.id === 'draw') })));
   const p = problemOf(lg);
   const stats = E.run(p, { mode: 'exhaustive', lo: 1, hi: 2 });
   for (let focus = 0; focus < p.n; focus++) {
@@ -158,7 +158,7 @@ test('性能: 10人・未実施12試合・3結果(531,441通り)', () => {
     if (skip++ < 12) continue;
     matches.push({ a: names[i], b: names[j], outcome: 'win', winner: (i + j) % 2 ? names[i] : names[j] });
   }
-  const lg = league(names, matches, M.defaultOutcomes().map(o => Object.assign(o, { simulate: o.id !== 'void' })));
+  const lg = league(names, matches, M.defaultOutcomes().map(o => Object.assign(o, { simulate: (o.id === 'win' || o.id === 'draw') })));
   const p = problemOf(lg);
   assert.strictEqual(E.countPatterns(p), 531441);
   const t0 = Date.now();
